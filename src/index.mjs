@@ -1,14 +1,192 @@
-// dsh-work-continuity — function plugin entry (skeleton v0.1)
-// WorkState 与 User Memory 分库逻辑上分离，但可共享 Evidence Ledger。
-// MVP：/checkpoint 显式持久化 goal/decisions/open_questions/next_actions/artifacts。
+// dsh-work-continuity — function plugin entry。
+//
+// Work Continuity（CONTRACTS.md §5）：WorkState 与 User Memory 分库逻辑上分离。
+// MVP：/checkpoint 命令显式持久化 goal/decisions/next_steps/artifacts，
+//      human-checkable，不每 turn LLM 总结。
+//
+// 参考 memento 的 /memory 命令模式：commands 是可选的 host 服务，
+// 缺失（headless）自动跳过。
+
+import { openWorkStore, WORK_STATUSES } from './store.mjs'
 
 export const name = 'work-continuity'
 export const inject = []
-export const Config = {}
+export const Config = {
+  workDir: undefined,   // 自定义存储目录（默认 $DSH_HOME/dsh-work-continuity）
+  debug: false,
+}
 
-export function apply(ctx) {
-  // TODO(v0.1):
-  // 1. /checkpoint 命令：显式保存 WorkState（human-checkable，不每 turn LLM 总结）
-  // 2. session/event 投影 → goal/decision/artifact/status 检测（后台）
-  // 3. 供 Context Composer 读取的 WorkState materialized view
+const USAGE = [
+  'Usage: /checkpoint <verb> [args]',
+  '  goal <text>         设置当前目标',
+  '  decision <text>     记录一个决策',
+  '  next <text>         添加下一步行动',
+  '  artifact <path>     记录产物路径',
+  '  unresolved <text>   记录未解决问题',
+  '  status <planned|active|blocked|paused|done>  更新状态',
+  '  focus <text>        设置当前焦点',
+  '  show                查看当前 WorkState',
+  '  clear               清空（重置为初始状态）',
+].join('\n')
+
+/** 命令描述（en/zh） */
+const COMMAND_DESCRIPTION = {
+  en: {
+    description: 'Manage the current work state (goal/decisions/next steps) for cross-session continuity',
+    hint: '/checkpoint goal <goal> | decision <text> | next <text> | show',
+  },
+  zh: {
+    description: '管理工作状态（目标/决策/下一步）以实现跨会话连续性',
+    hint: '/checkpoint goal <目标> | decision <决策> | next <下一步> | show',
+  },
+}
+
+export function apply(ctx, config = {}) {
+  const store = openWorkStore({ dir: config.workDir })
+  ctx.provide('work', createWorkService(store))
+
+  registerCheckpointCommand(ctx, store, config)
+
+  ctx.effect(() => () => {
+    store.close()
+  })
+}
+
+/** ctx.work 服务：WorkState 读写 */
+function createWorkService(store) {
+  return {
+    /** 读取当前 WorkState（无则 null） */
+    get(scopeId, projectId) {
+      return store.get({ scopeId, projectId })
+    },
+    /** 保存 WorkState（upsert） */
+    save(input) {
+      return store.save(input)
+    },
+  }
+}
+
+/** /checkpoint 命令注册（commands 可选服务，缺失跳过） */
+function registerCheckpointCommand(ctx, store, config) {
+  const commands = ctx.get('commands')
+  if (!commands || typeof commands.register !== 'function') return
+  commands.register({
+    name: 'checkpoint',
+    description: COMMAND_DESCRIPTION.en.description,
+    input: { hint: COMMAND_DESCRIPTION.en.hint },
+    handler: async (invocation) => {
+      try {
+        return handleCheckpoint(store, invocation, ctx)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        return { kind: 'error', text: `checkpoint error: ${message}` }
+      }
+    },
+  })
+}
+
+/** /checkpoint 处理器 */
+async function handleCheckpoint(store, invocation, ctx) {
+  const raw = String(invocation?.rawInput ?? '').trim()
+  if (!raw) return { kind: 'success', text: USAGE }
+
+  const [verb, ...rest] = raw.split(/\s+/)
+  const arg = rest.join(' ').trim()
+  const scopeId = scopeOf(invocation, ctx)
+
+  const state = store.get({ scopeId }) ?? {
+    scopeId, goal: '', status: 'planned', decisions: [], checkpoints: [],
+    unresolved: [], nextSteps: [], artifacts: [], handoff: null,
+  }
+
+  switch (verb) {
+    case 'goal':
+      if (!arg) return { kind: 'error', text: 'goal needs text: /checkpoint goal <goal>' }
+      state.goal = arg
+      state.status = state.status === 'done' ? 'active' : state.status
+      store.save(state)
+      return { kind: 'success', text: `goal set: ${arg}` }
+
+    case 'decision':
+      if (!arg) return { kind: 'error', text: 'decision needs text: /checkpoint decision <text>' }
+      state.decisions.push({ text: arg, evidenceIds: [] })
+      store.save(state)
+      return { kind: 'success', text: `decision #${state.decisions.length} recorded` }
+
+    case 'next':
+      if (!arg) return { kind: 'error', text: 'next needs text: /checkpoint next <text>' }
+      state.nextSteps.push(arg)
+      store.save(state)
+      return { kind: 'success', text: `next step #${state.nextSteps.length} added` }
+
+    case 'artifact':
+      if (!arg) return { kind: 'error', text: 'artifact needs path: /checkpoint artifact <path>' }
+      state.artifacts.push(arg)
+      store.save(state)
+      return { kind: 'success', text: `artifact added: ${arg}` }
+
+    case 'unresolved':
+      if (!arg) return { kind: 'error', text: 'unresolved needs text: /checkpoint unresolved <text>' }
+      state.unresolved.push(arg)
+      store.save(state)
+      return { kind: 'success', text: `unresolved item added` }
+
+    case 'status':
+      if (!WORK_STATUSES.includes(arg)) {
+        return { kind: 'error', text: `status must be one of: ${WORK_STATUSES.join(' | ')}` }
+      }
+      state.status = arg
+      state.checkpoints.push({ timestamp: new Date().toISOString(), state: arg, evidenceIds: [] })
+      store.save(state)
+      return { kind: 'success', text: `status -> ${arg}` }
+
+    case 'focus':
+      if (!arg) return { kind: 'error', text: 'focus needs text: /checkpoint focus <text>' }
+      state.focus = arg
+      store.save(state)
+      return { kind: 'success', text: `focus set: ${arg}` }
+
+    case 'show':
+      return { kind: 'success', text: renderWorkState(state) }
+
+    case 'clear': {
+      store.save({ scopeId, goal: '', status: 'planned', decisions: [], checkpoints: [], unresolved: [], nextSteps: [], artifacts: [], handoff: null })
+      return { kind: 'success', text: 'work state cleared' }
+    }
+
+    default:
+      return { kind: 'success', text: USAGE }
+  }
+}
+
+/** 渲染 WorkState 为人类可读文本 */
+function renderWorkState(state) {
+  const lines = [
+    `[work] status: ${state.status}`,
+    state.goal ? `goal: ${state.goal}` : 'goal: (none)',
+    state.focus ? `focus: ${state.focus}` : '',
+  ]
+  if (state.decisions.length) {
+    lines.push('decisions:')
+    state.decisions.forEach((d, i) => lines.push(`  ${i + 1}. ${d.text}`))
+  }
+  if (state.nextSteps.length) {
+    lines.push('next steps:')
+    state.nextSteps.forEach((s, i) => lines.push(`  ${i + 1}. ${s}`))
+  }
+  if (state.unresolved.length) {
+    lines.push('unresolved:')
+    state.unresolved.forEach((s, i) => lines.push(`  ${i + 1}. ${s}`))
+  }
+  if (state.artifacts.length) {
+    lines.push('artifacts:')
+    state.artifacts.forEach((a, i) => lines.push(`  ${i + 1}. ${a}`))
+  }
+  return lines.filter(Boolean).join('\n')
+}
+
+/** 会话作用域：agent 会话 cwd 或默认 user-global */
+function scopeOf(invocation, ctx) {
+  const session = invocation?.agent?.session
+  return session?.cwd ?? ctx?.session?.cwd ?? 'user-global'
 }
