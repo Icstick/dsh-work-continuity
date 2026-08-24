@@ -1,0 +1,4 @@
+# dsh-work-continuity bundle patch
+- insert:
+    - id: work-continuity
+      name: dsh-work-continuity
