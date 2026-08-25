@@ -8,13 +8,14 @@
 // 缺失（headless）自动跳过。
 
 import { openWorkStore, WORK_STATUSES } from './store.mjs'
+import z from '@deepseek-ai/schemastery'
 
 export const name = 'work-continuity'
 export const inject = []
-export const Config = {
-  workDir: undefined,   // 自定义存储目录（默认 $DSH_HOME/dsh-work-continuity）
-  debug: false,
-}
+export const Config = z.object({
+  workDir: z.string(),
+  debug: z.boolean().default(false),
+})
 
 const USAGE = [
   'Usage: /checkpoint <verb> [args]',
