@@ -34,7 +34,7 @@
     "oxlint": "^0.18.1"
   },
   "scripts": {
-    "test": "node --test "test/*.test.mjs"",
+    "test": "node --test \"test/*.test.mjs\"",
     "lint": "oxlint"
   },
   "engines": {
