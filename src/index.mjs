@@ -67,22 +67,45 @@ function createWorkService(store) {
   }
 }
 
-/** /checkpoint 命令注册（commands 可选服务，缺失跳过） */
+/**
+ * 可选服务就绪即调用（对齐 dsh-memento 的 withService 模式）：
+ * apply 时 commands 服务可能尚未提供（bundle 加载顺序），一次性 ctx.get 会静默跳过；
+ * 必须订阅 internal/service 事件，等 commands 出现再注册（2026-08-27 正式实例实测教训）。
+ */
+function withService(ctx, serviceName, fn) {
+  const existing = ctx.get(serviceName)
+  if (existing !== undefined && existing !== null) {
+    fn(existing)
+    return
+  }
+  const off = ctx.on('internal/service', (name) => {
+    if (name !== serviceName) return
+    const service = ctx.get(serviceName)
+    if (service !== undefined && service !== null) {
+      off()
+      fn(service)
+    }
+  })
+}
+
+/** /checkpoint 命令注册（commands 可选服务，缺失时等待其就绪） */
 function registerCheckpointCommand(ctx, store, config) {
-  const commands = ctx.get('commands')
-  if (!commands || typeof commands.register !== 'function') return
-  commands.register({
-    name: 'checkpoint',
-    description: COMMAND_DESCRIPTION.en.description,
-    input: { hint: COMMAND_DESCRIPTION.en.hint },
-    handler: async (invocation) => {
-      try {
-        return handleCheckpoint(store, invocation, ctx)
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        return { kind: 'error', text: `checkpoint error: ${message}` }
-      }
-    },
+  withService(ctx, 'commands', (commands) => {
+    if (!commands || typeof commands.register !== 'function') return
+    commands.register({
+      name: 'checkpoint',
+      description: COMMAND_DESCRIPTION.en.description,
+      input: { hint: COMMAND_DESCRIPTION.en.hint },
+      handler: async (invocation) => {
+        try {
+          return handleCheckpoint(store, invocation, ctx)
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          return { kind: 'error', text: 'checkpoint error: ' + message }
+        }
+      },
+    })
+    ctx.logger?.info?.('[work-continuity] /checkpoint command registered')
   })
 }
 

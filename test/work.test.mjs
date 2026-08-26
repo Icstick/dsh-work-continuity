@@ -61,3 +61,44 @@ test('状态枚举校验（非法 status 拒绝）', (t) => {
   const store = fresh(t)
   assert.throws(() => store.save({ scopeId: 's', status: 'invalid' }), /status must be one of/)
 })
+
+// ---- /checkpoint 命令注册（commands 服务就绪时序） ----
+
+function mockCtx({ commandsAtStart }) {
+  const listeners = {}
+  const registered = []
+  const ctx = {
+    get(name) { return name === 'commands' ? commandsAtStart : undefined },
+    on(evt, cb) { (listeners[evt] ??= []).push(cb); return () => {} },
+    provide() {},
+    effect() { return () => {} },
+    __emit(evt, arg) { for (const cb of listeners[evt] ?? []) cb(arg) },
+    __registered: registered,
+  }
+  return ctx
+}
+
+test('apply 时 commands 已就绪 → 立即注册', async (t) => {
+  const { apply } = await import('../src/index.mjs')
+  const registered = []
+  const ctx = mockCtx({ commandsAtStart: { register: (def) => registered.push(def) } })
+  apply(ctx, { workDir: mkdtempSync(path.join(tmpdir(), 'acp-wc-')) })
+  assert.equal(registered.length, 1)
+  assert.equal(registered[0].name, 'checkpoint')
+  assert.equal(typeof registered[0].handler, 'function')
+})
+
+test('apply 时 commands 未就绪 → internal/service 事件后注册（2026-08-27 正式实例教训）', async (t) => {
+  const { apply } = await import('../src/index.mjs')
+  const registered = []
+  const ctx = mockCtx({ commandsAtStart: undefined })
+  apply(ctx, { workDir: mkdtempSync(path.join(tmpdir(), 'acp-wc-')) })
+  assert.equal(registered.length, 0) // 未就绪：不注册、不抛错
+  // 服务随后就绪（订阅 internal/service）
+  const commands = { register: (def) => registered.push(def) }
+  const origGet = ctx.get
+  ctx.get = (name) => (name === 'commands' ? commands : origGet(name))
+  ctx.__emit('internal/service', 'commands')
+  assert.equal(registered.length, 1)
+  assert.equal(registered[0].name, 'checkpoint')
+})
