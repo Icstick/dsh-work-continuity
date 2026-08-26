@@ -209,8 +209,12 @@ function renderWorkState(state) {
   return lines.filter(Boolean).join('\n')
 }
 
-/** 会话作用域：agent 会话 cwd 或默认 user-global */
+/**
+ * 会话作用域：agent 会话 cwd 或默认 user-global。
+ * 注意：不能直接读 ctx.session / invocation.agent.session —— cordis proxy 会抛
+ * "cannot get property 'session' without inject"；用显式 ctx.get（同 withService）。
+ */
 function scopeOf(invocation, ctx) {
-  const session = invocation?.agent?.session
-  return session?.cwd ?? ctx?.session?.cwd ?? 'user-global'
+  const session = typeof ctx?.get === 'function' ? ctx.get('session') : undefined
+  return session?.cwd ? 'workspace' : 'user-global'
 }

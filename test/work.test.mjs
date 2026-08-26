@@ -102,3 +102,12 @@ test('apply 时 commands 未就绪 → internal/service 事件后注册（2026-0
   assert.equal(registered.length, 1)
   assert.equal(registered[0].name, 'checkpoint')
 })
+test('handleCheckpoint：ctx 无 session 服务时不抛 without inject（2026-08-27 正式实例教训）', async (t) => {
+  const { apply } = await import('../src/index.mjs')
+  const registered = []
+  const ctx = mockCtx({ commandsAtStart: { register: (def) => registered.push(def) } })
+  apply(ctx, { workDir: mkdtempSync(path.join(tmpdir(), 'acp-wc-')) })
+  const result = await registered[0].handler({ rawInput: 'goal 测试目标' })
+  assert.equal(result.kind, 'success')
+  assert.ok(result.text.includes('goal set'))
+})
