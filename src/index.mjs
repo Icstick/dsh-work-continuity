@@ -43,7 +43,12 @@ const COMMAND_DESCRIPTION = {
 }
 
 export function apply(ctx, config = {}) {
-  const store = openWorkStore({ dir: config.workDir })
+  // M4 R2：workDir 必须显式（DSH_HOME 环境变量不可靠——正式实例踩坑记录）。
+// 未配置时回退 DSH_HOME 并警告（fail-safe，但强烈建议显式配置）。
+if (!config.workDir) {
+  ctx.logger?.warn?.('[work-continuity] workDir 未显式配置，回退 $DSH_HOME/dsh-work-continuity——环境变量不可靠，请显式配置 workDir')
+}
+const store = openWorkStore({ dir: config.workDir })
   ctx.provide('work', createWorkService(store))
 
   registerCheckpointCommand(ctx, store, config)
