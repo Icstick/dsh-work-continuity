@@ -17,6 +17,27 @@ export const Config = z.object({
   debug: z.boolean().default(false),
 })
 
+/** 设置页配置命名空间（2026-08-30：设置 → 插件 → 插件配置；settings.yaml 持久化） */
+export const SETTINGS_NAMESPACE = 'work-continuity'
+
+/**
+ * settings 文档值合并进启动配置（settings 优先，缺失回退 Config 默认）。
+ * 生效语义：设置页保存 → settings.yaml → 下次启动 apply 时覆盖（重启生效）。
+ */
+export function mergeSettingsIntoConfig(ctx, config) {
+  let section = null
+  try {
+    const settings = ctx.get('settings')
+    section = settings?.get?.(SETTINGS_NAMESPACE) ?? null
+  } catch { /* settings 服务缺失 → 用 Config */ }
+  if (!section || typeof section !== 'object') return { ...config }
+  const merged = { ...config }
+  for (const [key, value] of Object.entries(section)) {
+    if (value !== undefined && value !== null) merged[key] = value
+  }
+  return merged
+}
+
 const USAGE = [
   'Usage: /checkpoint <verb> [args]',
   '  goal <text>         设置当前目标',
@@ -43,6 +64,17 @@ const COMMAND_DESCRIPTION = {
 }
 
 export function apply(ctx, config = {}) {
+  // 设置页（settings.yaml）优先于 cordis.patch.yml；apply 时一次性合并（重启生效）
+  config = mergeSettingsIntoConfig(ctx, config)
+
+  // --- 设置页 namespace 注册（2026-08-30：设置 → 插件 → 插件配置 tab）---
+  ctx.inject(['settings'], (settingsCtx) => {
+    settingsCtx.settings.register(SETTINGS_NAMESPACE, z.object({
+      workDir: z.string(),
+      debug: z.boolean(),
+    }))
+  })
+
   // M4 R2：workDir 必须显式（DSH_HOME 环境变量不可靠——正式实例踩坑记录）。
 // 未配置时回退 DSH_HOME 并警告（fail-safe，但强烈建议显式配置）。
 if (!config.workDir) {

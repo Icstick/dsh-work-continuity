@@ -111,3 +111,11 @@ node test/work.test.mjs
 ## License 与致谢
 
 MIT License。参考项目致谢见 [ACKNOWLEDGMENTS.md](ACKNOWLEDGMENTS.md)。
+
+## 设置页配置卡片（v0.1.1+）
+
+- 位置：DSH Web **设置 → 插件 → 插件配置**（`work-continuity` 卡片）
+- 机制：host 侧注册 settings namespace（`work-continuity`），client bundle（`lib/client.js`，
+  由 `node scripts/build-client.mjs` 生成）注册设置卡片；保存写入 settings.yaml
+- 生效语义：**保存后重启生效**（apply 时 settings 值覆盖 cordis Config）
+- 字段：workDir（重启生效）/ debug

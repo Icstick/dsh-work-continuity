@@ -71,6 +71,7 @@ function mockCtx({ commandsAtStart }) {
     get(name) { return name === 'commands' ? commandsAtStart : undefined },
     on(evt, cb) { (listeners[evt] ??= []).push(cb); return () => {} },
     provide() {},
+    inject() {}, // settings 可选服务：测试 mock 无 settings → no-op
     effect() { return () => {} },
     __emit(evt, arg) { for (const cb of listeners[evt] ?? []) cb(arg) },
     __registered: registered,
