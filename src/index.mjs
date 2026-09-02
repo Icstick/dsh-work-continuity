@@ -87,7 +87,7 @@ const store = openWorkStore({ dir: config.workDir })
   ctx.provide('work', createWorkService(store))
 
   registerCheckpointCommand(ctx, store, config)
-  registerGoalAutoCapture(ctx, store)
+  registerAutoCapture(ctx, store)
 
   ctx.effect(() => () => {
     store.close()
@@ -95,52 +95,107 @@ const store = openWorkStore({ dir: config.workDir })
 }
 
 /**
- * P1-2（2026-09-02）：goal 工具事件 → 自动写 WorkState。
+ * P1-5（2026-09-02）：自动捕获从「goal 工具参数事件」升级为**权威域事件**。
  *
- * 为什么要这个：审计发现 checkpoint 安装以来只有 1 次冒烟写入、7 天零使用——
- * 症结不是功能不好，是**要人记得敲命令**。外部实测教训同向：使用率低时该降低使用成本，
- * 而不是加功能。这里把「人记得敲」换成「系统自己捕捉」。
+ * 为什么要升级：P1-2 监听 tool/call|tool/result 猜工具名（name=create_goal/update_goal），
+ * 依赖事件负载里恰好带 args.objective/action——负载形状一变就静默失效（work_state 空转教训）。
+ * 真实宿主在 goal 域每次 mutation 都会 append 权威事件 `goal/change`（data=GoalChangeMeta，
+ * 含 operation + goal.objective + goal.phase），todo 域每次写入都会 append `todo/write`
+ * （data.todos=[{content,status}]）——这两个事件**必然发生、形状稳定**，是可靠触发面。
+ *
+ * 触发语义（用户 2026-09-02 拍板：把门槛从「只有显式 goal」调低到这些节点）：
+ *   1. `goal/change`（create/edit/pause/resume/complete/block/clear）→ 构想/长期目标/生命周期；
+ *   2. `todo/write` 且未完成任务 ≥ 2 → 「工作进行到需要追踪的节点」（agent 已把构想拆成
+ *      多步执行计划，且该 scope 尚无 WorkState）→ 自动建档（goal 留待 goal 事件或 /checkpoint
+ *      goal 补充，nextSteps 取未完成任务，focus 取首个 in_progress/pending 任务）。
+ *      已有 state 不覆盖（用户手记优先，避免 todo 每轮全量替换造成高频写库）。
  *
  * 纪律：整段 fail-open（任何异常只 warn，不阻断 turn）；事件结构做多路径防御性取值；
  * 内容无变化不写（便宜门控，见 store.save 的 diff 判定）。
  */
-function registerGoalAutoCapture(ctx, store) {
+function registerAutoCapture(ctx, store) {
   ctx.on('session/event', (session, event) => {
     try {
       if (!event || typeof event !== 'object') return
       const type = event.type ?? ''
-      if (type !== 'tool/call' && type !== 'tool/result') return
-      const data = event.data ?? {}
-      const name = data.name ?? data.toolName ?? data.tool ?? data.call?.name ?? ''
-      if (name !== 'create_goal' && name !== 'update_goal') return
-      const args = data.args ?? data.input ?? data.arguments ?? data.call?.args ?? {}
-      const objective = typeof args.objective === 'string' ? args.objective.trim() : ''
-      const action = typeof args.action === 'string' ? args.action : ''
-      const cwd = session?.cwd ?? (typeof ctx.get === 'function' ? ctx.get('session')?.cwd : undefined)
-      const scopeId = scopeIdForCwd(cwd)
-      const state = getStateCompat(store, scopeId) ?? {
-        scopeId, goal: '', status: 'planned', decisions: [], checkpoints: [],
-        unresolved: [], nextSteps: [], artifacts: [], completedSteps: [], handoff: null,
+      if (type === 'goal/change') {
+        captureGoalChange(ctx, store, session, event.data ?? {})
+      } else if (type === 'todo/write') {
+        captureTodoWrite(ctx, store, session, event.data ?? {})
       }
-      state.scopeId = scopeId
-      let changed = false
-      if (objective && state.goal !== objective) {
-        state.goal = objective
-        if (state.status === 'done') state.status = 'active'
-        changed = true
-      }
-      if (action === 'complete' && state.status !== 'done') { state.status = 'done'; changed = true }
-      if (action === 'blocked' && state.status !== 'blocked') { state.status = 'blocked'; changed = true }
-      if (action === 'pause' && state.status !== 'paused') { state.status = 'paused'; changed = true }
-      if (!changed) return
-      store.save(state)
-      store.appendAudit?.({ op: 'auto-goal', scopeId, detail: name + (action ? ':' + action : '') })
-      ctx.logger?.info?.('[work-continuity] auto-captured work state from ' + name + (action ? ' (' + action + ')' : ''))
     } catch (err) {
-      ctx.logger?.warn?.('[work-continuity] wc:degraded auto_goal_capture_failed reason='
+      ctx.logger?.warn?.('[work-continuity] wc:degraded auto_capture_failed reason='
         + (err instanceof Error ? err.message : String(err)))
     }
   })
+}
+
+/** goal/change（权威）：目标/构想/生命周期 → WorkState.goal/status。clear 清空 goal。 */
+function captureGoalChange(ctx, store, session, data) {
+  const operation = typeof data.operation === 'string' ? data.operation : ''
+  const goal = data.goal && typeof data.goal === 'object' ? data.goal : {}
+  const objective = typeof goal.objective === 'string' ? goal.objective.trim() : ''
+  const phase = typeof goal.phase === 'string' ? goal.phase : ''
+  const cwd = session?.cwd ?? (typeof ctx.get === 'function' ? ctx.get('session')?.cwd : undefined)
+  const scopeId = scopeIdForCwd(cwd)
+  const state = getStateCompat(store, scopeId) ?? {
+    scopeId, goal: '', status: 'planned', decisions: [], checkpoints: [],
+    unresolved: [], nextSteps: [], artifacts: [], completedSteps: [], handoff: null,
+  }
+  state.scopeId = scopeId
+  let changed = false
+  if (operation === 'clear') {
+    if (state.goal !== '') { state.goal = ''; state.status = 'planned'; changed = true }
+    if (!changed) return
+    store.save(state)
+    store.appendAudit?.({ op: 'auto-goal', scopeId, detail: 'goal/change:clear' })
+    ctx.logger?.info?.('[work-continuity] auto-captured goal clear')
+    return
+  }
+  if (objective && state.goal !== objective) {
+    state.goal = objective
+    changed = true
+  }
+  const status = phaseToStatus(phase)
+  if (status && state.status !== status) { state.status = status; changed = true }
+  if (state.goal && state.status === 'planned' && changed) { state.status = 'active'; changed = true }
+  if (!changed) return
+  store.save(state)
+  store.appendAudit?.({ op: 'auto-goal', scopeId, detail: 'goal/change:' + operation + ':' + (phase || '') })
+  ctx.logger?.info?.('[work-continuity] auto-captured goal from goal/change (' + operation + ')')
+}
+
+/** todo/write（权威）：多步任务计划 → 尚无 WorkState 时自动建档。 */
+function captureTodoWrite(ctx, store, session, data) {
+  const todos = Array.isArray(data.todos) ? data.todos : []
+  const open = todos.filter((t) => t && typeof t === 'object'
+    && typeof t.content === 'string' && t.content.trim()
+    && t.status !== 'completed')
+  if (open.length < 2) return // 单任务不构成「需要追踪的节点」
+  const cwd = session?.cwd ?? (typeof ctx.get === 'function' ? ctx.get('session')?.cwd : undefined)
+  const scopeId = scopeIdForCwd(cwd)
+  const existing = getStateCompat(store, scopeId)
+  if (existing) return // 已有 state：goal/change 与 /checkpoint 优先；todo 全量替换不覆盖手记
+  const firstOpen = open[0].content.trim()
+  const nextSteps = open.slice(0, 5).map((t) => t.content.trim())
+  store.save({
+    scopeId, goal: '', status: 'active', focus: firstOpen.slice(0, 200),
+    decisions: [], checkpoints: [], unresolved: [], nextSteps,
+    artifacts: [], completedSteps: [], handoff: null,
+  })
+  store.appendAudit?.({ op: 'auto-todo', scopeId, detail: 'todo/write:auto-create open=' + open.length })
+  ctx.logger?.info?.('[work-continuity] auto-created work state from todo/write (open=' + open.length + ')')
+}
+
+/** goal phase → WorkState status（goal 域权威语义） */
+function phaseToStatus(phase) {
+  switch (phase) {
+    case 'active': return 'active'
+    case 'paused': return 'paused'
+    case 'blocked': return 'blocked'
+    case 'complete': return 'done'
+    default: return ''
+  }
 }
 
 /** ctx.work 服务：WorkState 读写 */
