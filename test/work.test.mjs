@@ -117,7 +117,7 @@ test('handleCheckpoint：ctx 无 session 服务时不抛 without inject（2026-0
 
 // ---- P1-5：自动捕获（goal/change / todo/write 权威事件，2026-09-02）----
 
-function mockAutoCtx({ dir }) {
+function mockAutoCtx() {
   const listeners = {}
   const cleanups = []
   const services = {}
@@ -143,7 +143,7 @@ function mockAutoCtx({ dir }) {
 
 async function freshAuto(t) {
   const dir = mkdtempSync(path.join(tmpdir(), 'acp-wc-auto-'))
-  const ctx = mockAutoCtx({ dir })
+  const ctx = mockAutoCtx()
   wcApply(ctx, { workDir: dir })
   t.after(() => {
     try { for (const c of ctx.__cleanups) c() } catch {}
@@ -234,3 +234,90 @@ test('P1-5 todo/write 已有 state 或 <2 未完成 → 不覆盖/不建', async
   assert.equal(ctx2.__services.work.get(scopeIdForCwd('D:\\ws\\proj-b')), null)
 })
 
+// ---- P1-6：work_state 工具 + pre-step 注入（2026-09-02，LLM 决断）----
+
+test('P1-6 work_state 工具注册（tools 就绪时）', async (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'acp-wc-tool-'))
+  const ctx = mockAutoCtx()
+  const registered = []
+  // 让 tools 服务可用：mockAutoCtx 的 provide 捕获；给 ctx 提供 tools
+  ctx.get = (name) => name === 'tools' ? { register: (def) => registered.push(def) } : (name === 'session' ? { cwd: 'D:\\ws\\proj-a' } : (name === 'work' ? ctx.__services.work : undefined))
+  wcApply(ctx, { workDir: dir })
+  await new Promise((r) => setTimeout(r, 10))
+  assert.ok(registered.some((d) => d.name === 'work_state'), 'work_state tool 应注册')
+  t.after(() => { try { for (const c of ctx.__cleanups) c() } catch {} rmSync(dir, { recursive: true, force: true }) })
+})
+
+test('P1-6 work_state 工具 execute：goal 写入与 show 读取', async (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'acp-wc-tool2-'))
+  const ctx = mockAutoCtx()
+  let toolDef = null
+  ctx.get = (name) => name === 'tools' ? { register: (def) => { toolDef = def } } : (name === 'session' ? { cwd: 'D:\\ws\\proj-a' } : (name === 'work' ? ctx.__services.work : undefined))
+  wcApply(ctx, { workDir: dir })
+  await new Promise((r) => setTimeout(r, 10))
+  assert.ok(toolDef, '工具已注册')
+  const exec = { agent: { session: { cwd: 'D:\\ws\\proj-a' } }, signal: { throwIfAborted() {} } }
+  const r1 = await toolDef.execute({ action: 'goal', text: 'P1-6 集成验证' }, exec)
+  assert.equal(r1.ok, true)
+  assert.ok(r1.text.includes('goal set'))
+  const st = ctx.__services.work.get(scopeIdForCwd('D:\\ws\\proj-a'))
+  assert.equal(st.goal, 'P1-6 集成验证')
+  const r2 = await toolDef.execute({ action: 'show' }, exec)
+  assert.equal(r2.ok, true)
+  assert.ok(r2.text.includes('P1-6 集成验证'))
+  t.after(() => { try { for (const c of ctx.__cleanups) c() } catch {} rmSync(dir, { recursive: true, force: true }) })
+})
+
+test('P1-6 work_state 工具 execute：非法 action 不崩', async (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'acp-wc-tool3-'))
+  const ctx = mockAutoCtx()
+  let toolDef = null
+  ctx.get = (name) => name === 'tools' ? { register: (def) => { toolDef = def } } : (name === 'session' ? { cwd: 'D:\\ws\\proj-a' } : (name === 'work' ? ctx.__services.work : undefined))
+  wcApply(ctx, { workDir: dir })
+  await new Promise((r) => setTimeout(r, 10))
+  const exec = { agent: { session: { cwd: 'D:\\ws\\proj-a' } }, signal: { throwIfAborted() {} } }
+  // schema enum 在 execute 前拦截非法 action（平台层 ToolArgsError）
+  await assert.rejects(() => toolDef.execute({ action: 'bogus' }, exec), /must be one of/)
+  t.after(() => { try { for (const c of ctx.__cleanups) c() } catch {} rmSync(dir, { recursive: true, force: true }) })
+})
+
+test('P1-6 pre-step 注入：有活跃 state → 追加摘要消息', async (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'acp-wc-inj-'))
+  const ctx = mockAutoCtx()
+  wcApply(ctx, { workDir: dir })
+  // 建 state
+  ctx.__services.work.save({ scopeId: scopeIdForCwd('D:\\ws\\proj-a'), goal: '重构工具箱', status: 'active', nextSteps: ['迁移 v3', '部署'] })
+  // 触发 pre-step
+  const listeners = ctx.__listeners['agent/pre-step'] ?? []
+  assert.ok(listeners.length >= 1, 'pre-step listener 已注册')
+  const baseMessages = [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }]
+  const decision = { kind: 'enter', messages: baseMessages }
+  const result = await listeners[0]({ agent: { session: { cwd: 'D:\\ws\\proj-a' } }, step: 1 }, async () => decision)
+  assert.equal(result.kind, 'enter')
+  assert.equal(result.messages.length, 2)
+  const injected = result.messages[1]
+  assert.ok(injected.content[0].text.includes('[work-state]'))
+  assert.ok(injected.content[0].text.includes('重构工具箱'))
+  assert.ok(injected.source.kind === 'plugin')
+  t.after(() => { try { for (const c of ctx.__cleanups) c() } catch {} rmSync(dir, { recursive: true, force: true }) })
+})
+
+test('P1-6 pre-step 注入：无 state / done / 非 step1 → 不注入', async (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'acp-wc-inj2-'))
+  const ctx = mockAutoCtx()
+  wcApply(ctx, { workDir: dir })
+  const listeners = ctx.__listeners['agent/pre-step'] ?? []
+  const decision = { kind: 'enter', messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }] }
+  // 无 state
+  let r = await listeners[0]({ agent: { session: { cwd: 'D:\\ws\\proj-a' } }, step: 1 }, async () => decision)
+  assert.equal(r.messages.length, 1)
+  // done state
+  ctx.__services.work.save({ scopeId: scopeIdForCwd('D:\\ws\\proj-a'), goal: 'g', status: 'done' })
+  r = await listeners[0]({ agent: { session: { cwd: 'D:\\ws\\proj-a' } }, step: 1 }, async () => decision)
+  assert.equal(r.messages.length, 1)
+  // 非 step1
+  ctx.__services.work.save({ scopeId: scopeIdForCwd('D:\\ws\\proj-a'), goal: 'g2', status: 'active' })
+  r = await listeners[0]({ agent: { session: { cwd: 'D:\\ws\\proj-a' } }, step: 3 }, async () => decision)
+  assert.equal(r.messages.length, 1)
+  t.after(() => { try { for (const c of ctx.__cleanups) c() } catch {} rmSync(dir, { recursive: true, force: true }) })
+})

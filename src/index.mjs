@@ -7,9 +7,10 @@
 // 参考 memento 的 /memory 命令模式：commands 是可选的 host 服务，
 // 缺失（headless）自动跳过。
 
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { openWorkStore, WORK_STATUSES } from './store.mjs'
 import z from '@deepseek-ai/schemastery'
+import { defineTool } from '@deepseek-ai/dsh-tools'
 
 export const name = 'work-continuity'
 export const inject = []
@@ -88,6 +89,8 @@ const store = openWorkStore({ dir: config.workDir })
 
   registerCheckpointCommand(ctx, store, config)
   registerAutoCapture(ctx, store)
+  registerWorkTool(ctx, store)
+  registerWorkStateInjection(ctx, store)
 
   ctx.effect(() => () => {
     store.close()
@@ -196,6 +199,195 @@ function phaseToStatus(phase) {
     case 'complete': return 'done'
     default: return ''
   }
+}
+
+/**
+ * P1-6（2026-09-02）：把 checkpoint 的「触发判断」交给 LLM。
+ *
+ * 为什么：P1-5 的事件捕获只能覆盖「工具被调用的事实」（goal/change、todo/write），
+ * 对话里自然语言提出的构想/节点没有结构化事件，事件驱动抓不到。用户拍板方向：
+ * 「把 checkpoint 功能注入对话，让 LLM 决断」——两个机制：
+ *   1. `work_state` 模型工具：goal/decision/next/artifact/unresolved/focus/status/done/
+ *      show/clear，与 /checkpoint 同一 store 与渲染，LLM 自主决定何时记录；
+ *   2. pre-step 注入紧凑 WorkState 摘要：该工作区有活跃 state 时每轮注入（~150 token），
+ *      让 LLM 知道"正在追踪什么"，在节点主动更新。
+ * 与 P1-5 互补：事件捕获兜底工具事实，LLM 判断覆盖自然语言内容。
+ * 纪律：fail-open、无 state 不注入、done 不注入、注入预算受限、审计全留痕。
+ */
+
+/** 每个 verb 的帮助（工具 description 内联，避免模型瞎猜） */
+const WORK_TOOL_ACTIONS = [
+  'goal <text>', 'decision <text>', 'next <text>', 'artifact <path>',
+  'unresolved <text>', 'focus <text>', 'status <planned|active|blocked|paused|done>',
+  'done <n>', 'show', 'clear',
+].join(' | ')
+
+/** work_state 工具注册（tools 可选服务，缺失自动跳过——headless 无 tools） */
+function registerWorkTool(ctx, store) {
+  withService(ctx, 'tools', (tools) => {
+    if (!tools || typeof tools.register !== 'function') return
+    tools.register(defineTool({
+      name: 'work_state',
+      description: '跨会话工作状态（goal/decisions/next steps/artifacts/unresolved），'
+        + '供后续会话续接工作。与 /checkpoint 命令同一数据。'
+        + '当用户提出新构想/目标、工作进行到值得追踪的节点、或需要跨会话记住进度时调用；'
+        + '琐碎单步不要记。action: ' + WORK_TOOL_ACTIONS,
+      parameters: {
+        action: {
+          type: 'string',
+          required: true,
+          enum: ['goal', 'decision', 'next', 'artifact', 'unresolved', 'focus', 'status', 'done', 'show', 'clear'],
+          description: '要执行的操作：goal=设/改目标；decision=记录决策；next=加下一步；'
+            + 'artifact=记录产物；unresolved=记录未决问题；focus=设当前焦点；'
+            + 'status=更新状态；done=标记第 n 个 next 完成；show=查看当前状态；clear=清空',
+        },
+        text: {
+          type: 'string',
+          description: 'action 为 goal/decision/next/artifact/unresolved/focus 时的内容',
+        },
+        status: {
+          type: 'string',
+          enum: ['planned', 'active', 'blocked', 'paused', 'done'],
+          description: 'action=status 时的目标状态',
+        },
+        index: {
+          type: 'integer',
+          description: 'action=done 时标记完成的 next 序号（从 1 开始）',
+        },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            ok: { type: 'boolean', required: true },
+            text: { type: 'string', required: true },
+          },
+        },
+        render: (_args, value) => [{
+          type: 'text',
+          text: value && value.ok === false
+            ? 'work_state error: ' + String(value.text ?? '')
+            : String(value.text ?? ''),
+        }],
+      },
+      async execute(args, exec) {
+        try {
+          exec?.signal?.throwIfAborted?.()
+          const action = typeof args.action === 'string' ? args.action : ''
+          // 组 rawInput，复用 handleCheckpoint（同一 store/渲染/审计）
+          let raw = ''
+          if (action === 'show' || action === 'clear' || action === 'status') {
+            raw = action === 'status'
+              ? 'status ' + String(args.status ?? '').trim()
+              : action
+          } else if (action === 'done') {
+            const n = Number.parseInt(String(args.index ?? ''), 10)
+            raw = Number.isInteger(n) && n > 0 ? 'done ' + n : 'done'
+          } else {
+            const text = typeof args.text === 'string' ? args.text.trim() : ''
+            raw = text ? action + ' ' + text : action
+          }
+          const sessionCwd = exec?.agent?.session?.cwd
+            ?? (typeof ctx.get === 'function' ? ctx.get('session')?.cwd : undefined)
+          const toolCtx = {
+            get: (name) => (name === 'session' ? { cwd: sessionCwd } : undefined),
+            logger: ctx.logger,
+          }
+          const result = await handleCheckpoint(store, { rawInput: raw }, toolCtx)
+          return { ok: result?.kind === 'success', text: String(result?.text ?? '') }
+        } catch (err) {
+          ctx.logger?.warn?.('[work-continuity] wc:degraded work_tool_failed reason='
+            + (err instanceof Error ? err.message : String(err)))
+          return { ok: false, text: 'work_state error: ' + (err instanceof Error ? err.message : String(err)) }
+        }
+      },
+    }))
+    ctx.logger?.info?.('[work-continuity] work_state tool registered')
+  })
+}
+
+/** 注入预算：goal 80 / focus 60 / next 3×90 / decision 2×100 / unresolved 2×80 字符 */
+const INJECT_GOAL_MAX = 80
+const INJECT_FOCUS_MAX = 60
+const INJECT_NEXT_MAX = 3
+const INJECT_NEXT_CHARS = 90
+const INJECT_DECISION_MAX = 2
+const INJECT_DECISION_CHARS = 100
+const INJECT_UNRESOLVED_MAX = 2
+const INJECT_UNRESOLVED_CHARS = 80
+
+/** 紧凑 WorkState 摘要（pre-step 注入用；空/全空返回 ''） */
+function renderWorkStateBrief(state) {
+  if (!state) return ''
+  const lines = []
+  const goal = String(state.goal ?? '').trim()
+  const focus = String(state.focus ?? '').trim()
+  const next = Array.isArray(state.nextSteps) ? state.nextSteps : []
+  const decisions = Array.isArray(state.decisions) ? state.decisions : []
+  const unresolved = Array.isArray(state.unresolved) ? state.unresolved : []
+  if (!goal && !focus && next.length === 0 && decisions.length === 0 && unresolved.length === 0) return ''
+  const head = []
+  if (goal) head.push('goal: ' + truncateStr(goal, INJECT_GOAL_MAX))
+  if (state.status && state.status !== 'planned') head.push('status: ' + state.status)
+  if (focus) head.push('focus: ' + truncateStr(focus, INJECT_FOCUS_MAX))
+  lines.push('[work-state] ' + head.join(' | '))
+  if (next.length > 0) {
+    lines.push('next: ' + next.slice(0, INJECT_NEXT_MAX).map((n) => truncateStr(String(n), INJECT_NEXT_CHARS)).join(' / '))
+  }
+  if (decisions.length > 0) {
+    lines.push('decided: ' + decisions.slice(0, INJECT_DECISION_MAX)
+      .map((d) => truncateStr(String(d?.text ?? ''), INJECT_DECISION_CHARS)).join(' / '))
+  }
+  if (unresolved.length > 0) {
+    lines.push('open: ' + unresolved.slice(0, INJECT_UNRESOLVED_MAX)
+      .map((u) => truncateStr(String(u), INJECT_UNRESOLVED_CHARS)).join(' / '))
+  }
+  lines.push('(work 状态可经 work_state 工具或 /checkpoint 更新)')
+  return lines.join('\n')
+}
+
+function truncateStr(text, max) {
+  const s = String(text ?? '')
+  return s.length > max ? s.slice(0, max - 1) + '…' : s
+}
+
+/** plugin user message（手写字面量，避免引入 dsh-llm 依赖；形状对齐 createUserMessage） */
+function workStatePluginMessage(text) {
+  return {
+    id: randomUUID(),
+    role: 'user',
+    content: [{ type: 'text', text }],
+    source: { kind: 'plugin', plugin: 'dsh-work-continuity', form: 'work-state' },
+  }
+}
+
+/**
+ * pre-step 注入：该工作区有活跃 WorkState 时，每轮首步注入紧凑摘要 + work_state 提示。
+ * fail-open：任何异常返回原决策/空决策，不阻断 turn（与 ACP composer 同范式）。
+ */
+function registerWorkStateInjection(ctx, store) {
+  ctx.on('agent/pre-step', async (payload, next) => {
+    let decision
+    try {
+      decision = await next()
+      if (payload?.step !== 1) return decision
+      if (!decision || decision.kind !== 'enter') return decision
+      const cwd = payload?.agent?.session?.cwd
+        ?? (typeof ctx.get === 'function' ? ctx.get('session')?.cwd : undefined)
+      const scopeId = scopeIdForCwd(cwd)
+      const state = getStateCompat(store, scopeId)
+      if (!state || state.status === 'done') return decision // 无 state / 已完成 → 不注入
+      const body = renderWorkStateBrief(state)
+      if (!body) return decision
+      return { kind: 'enter', messages: [...decision.messages, workStatePluginMessage(body)] }
+    } catch (err) {
+      ctx.logger?.warn?.('[work-continuity] wc:degraded work_state_inject_failed reason='
+        + (err instanceof Error ? err.message : String(err)))
+      if (decision) return decision
+      return { kind: 'enter', messages: [] }
+    }
+  })
 }
 
 /** ctx.work 服务：WorkState 读写 */
