@@ -33,6 +33,16 @@ CREATE TABLE IF NOT EXISTS work_state (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_work_scope_project ON work_state (scope_id, project_id);
+
+-- P1-3（2026-09-02）：可观测闭环。没有它答不出"这功能这周被用了几次、有多少 next 被完成"。
+CREATE TABLE IF NOT EXISTS work_audit (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts        INTEGER NOT NULL,
+  op        TEXT NOT NULL,        -- save | skip-nochange | auto-goal | inject | error | done
+  scope_id  TEXT NOT NULL DEFAULT '',
+  detail    TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_work_audit_ts ON work_audit (ts);
 `
 
 /** 状态枚举（CONTRACTS.md §5） */
@@ -49,6 +59,8 @@ export function openWorkStore(opts = {}) {
   const db = new DatabaseSync(path.join(dir, 'work.db'))
   db.exec(PRAGMAS)
   db.exec(SCHEMA)
+  // 迁移：completed_steps（P1-3 完成率闭环）。列已存在时 ALTER 抛错，忽略即可。
+  try { db.exec("ALTER TABLE work_state ADD COLUMN completed_steps TEXT NOT NULL DEFAULT '[]'") } catch { /* 已迁移 */ }
 
   /** WorkState 键：scope_id + project_id */
   function keyOf(scopeId, projectId = '') {
@@ -92,29 +104,71 @@ export function openWorkStore(opts = {}) {
       unresolved: JSON.stringify(input.unresolved ?? JSON.parse(existing?.unresolved ?? '[]')),
       next_steps: JSON.stringify(input.nextSteps ?? JSON.parse(existing?.next_steps ?? '[]')),
       artifacts: JSON.stringify(input.artifacts ?? JSON.parse(existing?.artifacts ?? '[]')),
+      completed_steps: JSON.stringify(input.completedSteps ?? JSON.parse(existing?.completed_steps ?? '[]')),
       handoff: input.handoff !== undefined ? JSON.stringify(input.handoff) : (existing?.handoff ?? null),
       version,
       created_at: existing?.created_at ?? now,
       updated_at: now,
     }
 
+    // 便宜门控（2026-09-02）：内容无变化就不写、不涨 version、不动 updated_at。
+    // 借鉴外部实测——把"每次触发都付出成本"变成"只有真变化才付出成本"。
+    if (existing) {
+      const same = existing.goal === payload.goal
+        && existing.status === payload.status
+        && (existing.focus ?? null) === (payload.focus ?? null)
+        && existing.decisions === payload.decisions
+        && existing.checkpoints === payload.checkpoints
+        && existing.unresolved === payload.unresolved
+        && existing.next_steps === payload.next_steps
+        && existing.artifacts === payload.artifacts
+        && (existing.completed_steps ?? '[]') === payload.completed_steps
+        && (existing.handoff ?? null) === (payload.handoff ?? null)
+      if (same) {
+        appendAudit({ op: 'skip-nochange', scopeId: input.scopeId, detail: 'no field changed' })
+        return toWorkState(existing)
+      }
+    }
+
     db.prepare(`
       INSERT OR REPLACE INTO work_state (
         id, scope_id, project_id, goal, status, focus, decisions, checkpoints,
-        unresolved, next_steps, artifacts, handoff, version, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        unresolved, next_steps, artifacts, completed_steps, handoff, version, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       payload.id, payload.scope_id, payload.project_id, payload.goal, payload.status,
       payload.focus, payload.decisions, payload.checkpoints, payload.unresolved,
-      payload.next_steps, payload.artifacts, payload.handoff, payload.version,
+      payload.next_steps, payload.artifacts, payload.completed_steps, payload.handoff, payload.version,
       payload.created_at, payload.updated_at,
     )
+    appendAudit({ op: 'save', scopeId: input.scopeId, detail: 'version=' + payload.version })
     return get({ scopeId: input.scopeId, projectId: input.projectId ?? '' })
+  }
+
+  /** P1-3：审计写入（自身失败不得影响主流程） */
+  function appendAudit({ op, scopeId = '', detail = '' }) {
+    try {
+      db.prepare('INSERT INTO work_audit (ts, op, scope_id, detail) VALUES (?, ?, ?, ?)')
+        .run(Date.now(), String(op), String(scopeId), String(detail).slice(0, 500))
+    } catch { /* 审计失败不阻断 */ }
+  }
+
+  /** P1-3：全部 WorkState（stats 用） */
+  function list() {
+    return db.prepare('SELECT * FROM work_state ORDER BY updated_at DESC').all().map(toWorkState)
+  }
+
+  /** P1-3：审计统计（最近 N 天按 op 汇总） */
+  function auditStats(days = 7) {
+    const since = Date.now() - days * 86400000
+    return db.prepare('SELECT op, COUNT(*) AS n FROM work_audit WHERE ts >= ? GROUP BY op ORDER BY n DESC')
+      .all(since)
+      .map((r) => ({ op: r.op, count: r.n }))
   }
 
   function close() { db.close() }
 
-  return { db, get, save, close }
+  return { db, get, save, close, list, appendAudit, auditStats }
 }
 
 function toWorkState(row) {
@@ -130,6 +184,7 @@ function toWorkState(row) {
     unresolved: JSON.parse(row.unresolved),
     nextSteps: JSON.parse(row.next_steps),
     artifacts: JSON.parse(row.artifacts),
+    completedSteps: JSON.parse(row.completed_steps ?? '[]'),
     handoff: row.handoff ? JSON.parse(row.handoff) : null,
     version: row.version,
     createdAt: row.created_at,
