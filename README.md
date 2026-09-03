@@ -65,6 +65,44 @@ Work Continuity 把工作状态变成**不用你记得记**的事：目标、决
 
 噪声控制：已有 WorkState 不被 todo 全量替换覆盖；done 状态不注入；内容无变化不写库（diff 门控）；全部 fail-open——插件任何异常只记日志，绝不阻断对话。
 
+## Agent 安装指南（面向自动化装配）
+
+> 给需要在本机 dsh 装配本插件的 agent/脚本读；人工安装见下一节。
+> 硬约束：① workDir 必须显式配置；② pnpm install 前先停 dsh（Windows native DLL 锁）；
+> ③ 同 id 的 patch 条目是整体覆盖，不要重复插。
+
+**1. 定位 profile**：`<DSH_HOME>/profiles/<profile>/`；先读 `package.json`，无
+`dsh.profile.bundles` 键则 profile 未初始化，先初始化再继续。
+
+**2. 添加依赖**（二选一）：
+
+```bash
+# A. GitHub 源：CLI 自动把声明 dsh.bundle 的包加入 dsh.profile.bundles
+dsh plugin --profile <profile> add github:Icstick/dsh-work-continuity
+# B. 本地开发：profile package.json dependencies 加 "dsh-work-continuity": "link:<绝对路径>",
+#    并在同文件 dsh.profile.bundles 数组追加 "dsh-work-continuity"
+```
+
+⚠️ `dsh plugin add` 不会写配置条目——第 3 步必须做。
+
+**3. 写配置**：编辑 profile 根 `cordis.patch.yml`（无则新建）：
+
+```yaml
+- id: work-continuity
+  name: dsh-work-continuity
+  config:
+    workDir: C:\path\to\work-state   # 必填：工作状态库绝对路径；DSH_HOME 环境变量不可靠
+```
+
+**4. 安装并重启**：停 dsh → profile 目录 `pnpm install` → 重启 dsh。
+
+**5. 验证**：
+- 数据：`<workDir>/work.db` 存在
+- 命令：对话里 `/checkpoint show` 正常响应（无状态时也应有明确空态提示）
+
+**故障速查**：/checkpoint 不存在 → commands 服务加载晚于插件就绪属正常时序，插件会
+等待注册；数据落在意外位置 → workDir 没显式配置（务必补）。
+
 ## 安装
 > **GitHub 一键安装**：`dsh plugin --profile <name> add github:Icstick/dsh-work-continuity`
 > （bundle patch 会自动挂载 work-continuity 条目）。装完后仍需在 profile 的
