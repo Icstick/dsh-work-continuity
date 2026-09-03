@@ -66,6 +66,11 @@ Work Continuity 把工作状态变成**不用你记得记**的事：目标、决
 噪声控制：已有 WorkState 不被 todo 全量替换覆盖；done 状态不注入；内容无变化不写库（diff 门控）；全部 fail-open——插件任何异常只记日志，绝不阻断对话。
 
 ## 安装
+> **GitHub 一键安装**：`dsh plugin --profile <name> add github:Icstick/dsh-work-continuity`
+> （bundle patch 会自动挂载 work-continuity 条目）。装完后仍需在 profile 的
+> cordis.patch.yml 给该条目补 `config.workDir`（数据目录必须显式）并重启；
+> 完整三步与字段说明见下。
+
 
 三步（和 dsh-adaptive-context 一样）：
 
