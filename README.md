@@ -9,7 +9,23 @@ DeepSeek Harness (dsh) 的 **Work Continuity** 插件——跨会话的工作状
 
 和 agent 干活的人应该都熟这个场景：昨天干到一半，今天打开新会话，agent 一脸茫然——"我们昨天聊到哪了？"你只好翻聊天记录，重新交代一遍背景。
 
-Work Continuity 把工作状态变成**一条命令的事**：目标、决策、下一步，你说一句就记下来；下次会话一句话就全部想起。
+Work Continuity 把工作状态变成**不用你记得记**的事：目标、决策、下一步，工作自己留下痕迹；下次会话打开，agent 已经知道你在追什么。
+
+## 三种捕获方式（v0.1.1+，2026-09-02/03）
+
+早期版本只靠人敲 `/checkpoint` 命令——审计发现**装了一周只有 1 次冒烟写入**：功能不坏，是"要人记得敲命令"这件事本身不成立。现在有三层，互相兜底：
+
+| 层 | 机制 | 覆盖的场景 |
+|---|---|---|
+| **事件自动捕获** | 监听宿主权威事件 `goal/change`（目标域每次变更必发）与 `todo/write`（任务清单每次写入必发） | agent 建了多步任务清单（≥2 项未完成）、用户设立/变更长期目标、目标完成/暂停/阻塞 |
+| **LLM 自主决断** | 注册 `work_state` 模型工具 + 每轮注入当前工作摘要 | 对话里自然语言提出的构想、值得追踪的节点——LLM 看见摘要、自己决定记什么 |
+| **显式命令** | `/checkpoint`（人随时可查可改） | 你想亲自盯着记的内容 |
+
+- goal/change 事件会**建档/更新**目标与状态（complete→done、pause→paused…，clear 清空）；
+- todo/write 事件只在**该工作区还没有任何 WorkState** 时自动建档（nextSteps 取自未完成任务）——已有手记内容不被每轮全量替换的 todo 覆盖；
+- 每轮 pre-step 注入紧凑摘要（goal/status/focus/下一步，~150 token），LLM 由此知道"正在追踪什么"，在节点主动用 `work_state` 工具更新；无状态或已完成（done）不注入。
+
+> 小故事：昨天你说"想给工具箱加个 FFT 工具"就睡了。当时 agent 顺手把这个构想记进了 next steps。今天新会话一开，agent 第一眼就看到 `[work-state] goal: 电子工具箱…`——不用你重复半句，直接接着昨天的话往下干。
 
 ## 一个简单的例子
 
@@ -37,9 +53,17 @@ Work Continuity 把工作状态变成**一条命令的事**：目标、决策、
 | `/checkpoint show` | 查看当前工作状态 | `/checkpoint show` |
 | `/checkpoint clear` | 清空 | `/checkpoint clear` |
 
+### work_state 模型工具（LLM 侧，同数据）
+
+模型可见工具 `work_state` 与 `/checkpoint` 共享同一 store/渲染/审计：action 支持 goal/decision/next/artifact/unresolved/focus/status/done/show/clear。工具描述明确告诉模型：用户提出新构想/目标、工作到值得追踪的节点、需要跨会话记住进度时调用；琐碎单步不要记。
+
 ## 设计取舍
 
-MVP 只做**显式命令持久化**——你说记什么，它记什么，全程人可以核对。不做每轮自动总结：自动总结省事，但常常记错重点，而且你不知道它偷偷记了什么。
+**人可核对是底线**：无论哪层捕获，写进 work.db 的每一条都可以 `/checkpoint show` 查、`work_audit` 审计回溯，绝不做不可见的"每轮 LLM 总结"。
+
+演进路径：MVP 只做显式命令（`/checkpoint`）→ 发现没人记得敲 → 加事件自动捕获（goal/change、todo/write，**确定性触发、无 LLM 猜测**）→ 再补 LLM 自主决断（`work_state` 工具 + 摘要注入，覆盖自然语言构想）。
+
+噪声控制：已有 WorkState 不被 todo 全量替换覆盖；done 状态不注入；内容无变化不写库（diff 门控）；全部 fail-open——插件任何异常只记日志，绝不阻断对话。
 
 ## 安装
 
