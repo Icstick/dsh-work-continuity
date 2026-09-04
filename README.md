@@ -1,5 +1,7 @@
 # dsh-work-continuity
 
+[![Awesome DSH Plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com)
+
 DeepSeek Harness (dsh) 的 **Work Continuity** 插件——跨会话的工作状态显式持久化，和通用记忆分开管理。
 
 > 设计铁律（与 ACP 一致）：**记忆不负责替你把活干完。**
