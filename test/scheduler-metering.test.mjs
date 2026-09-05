@@ -99,3 +99,34 @@ test('S1-P7 reportWorkStateUsage：空 body / scheduler 缺失 / recordUsage 故
   const ctx2 = mockCtx({})
   assert.doesNotThrow(() => reportWorkStateUsage(ctx2, 's', '无调度器'))
 })
+
+
+// ── 接线守卫（2026-09-05 M5 装配教训）────────────────────────────────────────
+// 此前 patch 时"已插入"守卫被函数定义行（export function registerWorkStateSection(ctx)）
+// 误匹配 → apply 里从未调用 registerWorkStateSection（wc.work_state 段从未注册）且模块级
+// 测试全绿。守卫 = 源码级断言：apply 调用 + 注入点上报调用必须存在。
+
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import path from 'node:path'
+
+test('接线守卫：apply 调用 registerWorkStateSection(ctx)（段注册接线在）', () => {
+  const src = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/index.mjs'), 'utf8')
+  const lines = src.split(/\r?\n/)
+  assert.ok(
+    lines.some((l) => l.trim() === 'registerWorkStateSection(ctx)'),
+    'apply 内必须有独立调用行（函数定义行带 export function 前缀不算）',
+  )
+})
+
+test('接线守卫：pre-step 注入点存在 reportWorkStateUsage 调用（非定义行）', () => {
+  const src = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/index.mjs'), 'utf8')
+  const lines = src.split(/\r?\n/)
+  const bodyIdx = lines.findIndex((l) => l.includes('const body = renderWorkStateBrief(state)'))
+  assert.ok(bodyIdx >= 0, '注入点存在（renderWorkStateBrief 调用）')
+  const after = lines.slice(bodyIdx, bodyIdx + 6)
+  assert.ok(
+    after.some((l) => l.trim() === 'reportWorkStateUsage(ctx, sessionId, body)'),
+    '注入点后 6 行内必须有上报调用',
+  )
+})

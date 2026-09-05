@@ -90,6 +90,7 @@ const store = openWorkStore({ dir: config.workDir })
   registerCheckpointCommand(ctx, store, config)
   registerAutoCapture(ctx, store)
   registerWorkTool(ctx, store)
+  registerWorkStateSection(ctx)
   registerWorkStateInjection(ctx, store)
 
   ctx.effect(() => () => {
@@ -423,6 +424,9 @@ function registerWorkStateInjection(ctx, store) {
       if (!state || state.status === 'done') return decision // 无 state / 已完成 → 不注入
       const body = renderWorkStateBrief(state)
       if (!body) return decision
+      // S1-P7：实际注入发生 → 向调度器上报注入字符（fail-open）
+      const sessionId = payload?.agent?.session?.id ?? ''
+      reportWorkStateUsage(ctx, sessionId, body)
       return { kind: 'enter', messages: [...decision.messages, workStatePluginMessage(body)] }
     } catch (err) {
       ctx.logger?.warn?.('[work-continuity] wc:degraded work_state_inject_failed reason='
