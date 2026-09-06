@@ -90,6 +90,7 @@ const store = openWorkStore({ dir: config.workDir })
   registerCheckpointCommand(ctx, store, config)
   registerAutoCapture(ctx, store)
   registerWorkTool(ctx, store)
+  registerWorkStateSection(ctx)
   registerWorkStateInjection(ctx, store)
 
   ctx.effect(() => () => {
@@ -362,6 +363,49 @@ function workStatePluginMessage(text) {
   }
 }
 
+// --- S1-P7（2026-09-05，B9 v0.3 P7）：注入调度器接线（dsh-inject-scheduler，方案 A 主动上报）---
+// 契约：调度器是可选项——缺失/故障只降级不阻断（WC 既有 fail-open 纪律延伸）；
+// 段注册复用本文件 withService（internal/service 等就绪，已实证 cordis 4 兼容）；
+// 上报 = 注入文本（renderWorkStateBrief 产物）生成后记录实际字符数。
+
+/** 本插件在注入调度器注册表中的段 key */
+export const WC_SECTION_KEY = 'wc.work_state'
+
+/** 注册 wc.work_state 段（幂等；budgetChars=0=未设上限——WC 无 token 预算概念，截断全按字符） */
+export function registerWorkStateSection(ctx) {
+  withService(ctx, 'injectScheduler', (sched) => {
+    if (!sched || typeof sched.registerSection !== 'function') return
+    void sched.registerSection({
+      key: WC_SECTION_KEY,
+      plugin: 'dsh-work-continuity',
+      order: 20,
+      budgetChars: 0,
+      unit: 'chars',
+      refresh: 'per-turn',
+    }).catch((err) => {
+      ctx.logger?.warn?.('[work-continuity] section register failed: ' + (err instanceof Error ? err.message : String(err)))
+    })
+  })
+}
+
+/** 注入后上报实际注入量（fail-open：任何异常静默降级，绝不阻断注入与 turn） */
+export function reportWorkStateUsage(ctx, sessionId, body) {
+  try {
+    if (typeof body !== 'string' || body.length === 0) return
+    const sched = ctx.get('injectScheduler')
+    if (!sched || typeof sched.recordUsage !== 'function') return
+    void sched.recordUsage({
+      ...(sessionId ? { sessionId } : {}),
+      section: WC_SECTION_KEY,
+      injectedChars: body.length,
+    }).catch((err) => {
+      ctx.logger?.warn?.('[work-continuity] usage report failed: ' + (err instanceof Error ? err.message : String(err)))
+    })
+  } catch (err) {
+    ctx.logger?.warn?.('[work-continuity] usage report degraded: ' + (err instanceof Error ? err.message : String(err)))
+  }
+}
+
 /**
  * pre-step 注入：该工作区有活跃 WorkState 时，每轮首步注入紧凑摘要 + work_state 提示。
  * fail-open：任何异常返回原决策/空决策，不阻断 turn（与 ACP composer 同范式）。
@@ -380,6 +424,9 @@ function registerWorkStateInjection(ctx, store) {
       if (!state || state.status === 'done') return decision // 无 state / 已完成 → 不注入
       const body = renderWorkStateBrief(state)
       if (!body) return decision
+      // S1-P7：实际注入发生 → 向调度器上报注入字符（fail-open）
+      const sessionId = payload?.agent?.session?.id ?? ''
+      reportWorkStateUsage(ctx, sessionId, body)
       return { kind: 'enter', messages: [...decision.messages, workStatePluginMessage(body)] }
     } catch (err) {
       ctx.logger?.warn?.('[work-continuity] wc:degraded work_state_inject_failed reason='
