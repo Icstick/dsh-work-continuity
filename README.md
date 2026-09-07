@@ -181,6 +181,8 @@ pnpm install
 node test/work.test.mjs
 ```
 
+仓库级开发计划与问题登记（backlog）：[docs/DEVELOPMENT-PLAN.md](docs/DEVELOPMENT-PLAN.md)。
+
 ## License 与致谢
 
 MIT License。参考项目致谢见 [ACKNOWLEDGMENTS.md](ACKNOWLEDGMENTS.md)。
