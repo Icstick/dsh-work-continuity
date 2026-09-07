@@ -60,7 +60,7 @@ Work Continuity 把工作状态变成**不用你记得记**的事：目标、决
 
 ### work_state 模型工具（LLM 侧，同数据）
 
-模型可见工具 `work_state` 与 `/checkpoint` 共享同一 store/渲染/审计：action 支持 goal/decision/next/artifact/unresolved/focus/status/done/show/export/clear。`next` 可带 `deadline`（ISO 日期或 YYYY-MM-DD）与 `deliverable`（交付物/验收判据——完成判据=实测结果而非口头自报），写入 next_meta 与 next_steps 下标对齐（P1-1）。注入摘要中的到期渲染/逾期标注在后续排期。工具描述明确告诉模型：用户提出新构想/目标、工作到值得追踪的节点、需要跨会话记住进度时调用；琐碎单步不要记。
+模型可见工具 `work_state` 与 `/checkpoint` 共享同一 store/渲染/审计：action 支持 goal/decision/next/artifact/unresolved/focus/status/done/show/export/clear。`next` 可带 `deadline`（ISO 日期或 YYYY-MM-DD）与 `deliverable`（交付物/验收判据——完成判据=实测结果而非口头自报），写入 next_meta 与 next_steps 下标对齐（P1-1）。注入摘要已渲染到期标注（T4 M4.5）：next 匹配 nextMeta[i].deadline → 「(dl YYYY-MM-DD)」，已过期 → 「⚠ 逾期」——模型每轮可见截止时间。工具描述明确告诉模型：用户提出新构想/目标、工作到值得追踪的节点、需要跨会话记住进度时调用；琐碎单步不要记。
 
 ## 设计取舍
 
