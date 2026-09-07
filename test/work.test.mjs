@@ -1,8 +1,8 @@
 // test/work.test.mjs — WorkState 存储与 checkpoint 处理测试
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdtempSync, rmSync, existsSync } from 'node:fs'
+import { tmpdir, homedir } from 'node:os'
 import path from 'node:path'
 import { openWorkStore } from '../src/store.mjs'
 import { apply as wcApply, scopeIdForCwd } from '../src/index.mjs'
@@ -320,4 +320,20 @@ test('P1-6 pre-step 注入：无 state / done / 非 step1 → 不注入', async 
   r = await listeners[0]({ agent: { session: { cwd: 'D:\\ws\\proj-a' } }, step: 3 }, async () => decision)
   assert.equal(r.messages.length, 1)
   t.after(() => { try { for (const c of ctx.__cleanups) c() } catch {} rmSync(dir, { recursive: true, force: true }) })
+})
+
+// ---- P2-2 回归（2026-09-07 审计）：openWorkStore dir 空值兜底，不落 cwd ----
+test('openWorkStore：dir 缺省/空值不落 cwd（回退 DSH_HOME 或 ~/.dsh）', (t) => {
+  const d1 = mkdtempSync(path.join(tmpdir(), 'wc-dir-ok-'))
+  const s1 = openWorkStore({ dir: d1 })
+  assert.ok(s1.dbPath.includes(d1))
+  s1.close(); rmSync(d1, { recursive: true, force: true })
+  const s2 = openWorkStore({ dir: '' })
+  assert.ok(path.isAbsolute(s2.dbPath), 'dbPath 应为绝对路径: ' + s2.dbPath)
+  assert.ok(s2.dbPath.includes('dsh-work-continuity'), '落在 dsh-work-continuity 目录')
+  assert.ok(!s2.dbPath.includes(process.cwd()), '不得落 cwd')
+  s2.close()
+  const home = process.env.DSH_HOME || path.join(homedir(), '.dsh')
+  const fallbackDir = path.join(home, 'dsh-work-continuity')
+  try { if (existsSync(fallbackDir)) rmSync(fallbackDir, { recursive: true, force: true }) } catch {}
 })

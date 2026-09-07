@@ -80,11 +80,11 @@ export function apply(ctx, config = {}) {
   })
 
   // M4 R2：workDir 必须显式（DSH_HOME 环境变量不可靠——正式实例踩坑记录）。
-// 未配置时回退 DSH_HOME 并警告（fail-safe，但强烈建议显式配置）。
-if (!config.workDir) {
-  ctx.logger?.warn?.('[work-continuity] workDir 未显式配置，回退 $DSH_HOME/dsh-work-continuity——环境变量不可靠，请显式配置 workDir')
-}
-const store = openWorkStore({ dir: config.workDir })
+  // 未配置时回退 $DSH_HOME/dsh-work-continuity 并警告（fail-safe，但强烈建议显式配置）。
+  if (!config.workDir) {
+    ctx.logger?.warn?.('[work-continuity] workDir 未显式配置，回退 $DSH_HOME/dsh-work-continuity——环境变量不可靠，请显式配置 workDir')
+  }
+  const store = openWorkStore({ dir: config.workDir })
   ctx.provide('work', createWorkService(store))
 
   registerCheckpointCommand(ctx, store, config)
@@ -597,6 +597,8 @@ async function handleCheckpoint(store, invocation, ctx) {
         return { kind: 'error', text: 'done needs a valid index: /checkpoint done <1..' + state.nextSteps.length + '>' }
       }
       const [finished] = state.nextSteps.splice(idx - 1, 1)
+      if (Array.isArray(state.nextMeta)) state.nextMeta.splice(idx - 1, 1)
+      // P1-1（2026-09-07 审计）：done 同步 nextMeta——防后续 next+deadline/deliverable 按下标 length-1 补写串到旧条目
       state.completedSteps.push({ text: finished, at: new Date().toISOString() })
       saveWithTrace(store, state, ctx, 'done')
       return { kind: 'success', text: 'done: ' + finished + '（剩余 ' + state.nextSteps.length + ' 项）' }
@@ -609,7 +611,8 @@ async function handleCheckpoint(store, invocation, ctx) {
       return { kind: 'success', text: renderWorkState(state) }
 
     case 'clear': {
-      store.save({ scopeId, goal: '', status: 'planned', decisions: [], checkpoints: [], unresolved: [], nextSteps: [], artifacts: [], handoff: null })
+      // P1-2（2026-09-07 审计）：save 缺省字段回填 existing——必须显式清 focus/nextMeta/completedSteps
+      store.save({ scopeId, goal: '', status: 'planned', focus: null, decisions: [], checkpoints: [], unresolved: [], nextSteps: [], nextMeta: [], artifacts: [], completedSteps: [], handoff: null })
       return { kind: 'success', text: 'work state cleared' }
     }
 

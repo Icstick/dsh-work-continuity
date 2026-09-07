@@ -121,3 +121,91 @@ test('W8 export 渲染为 Markdown 快照', () => {
   assert.ok(md.includes('写用例'))
 })
 
+// ---- W9/W10（2026-09-07 审计修复回归）：done 同步 nextMeta / clear 全重置 ----
+function mockCheckpointCtx() {
+  const listeners = {}
+  const registered = []
+  const commands = { register: (def) => registered.push(def) }
+  const services = {}
+  const ctx = {
+    get(name) {
+      if (name === 'commands') return commands
+      if (name === 'session') return { cwd: 'D:\\ws\\wc-golden' }
+      if (name === 'work') return services.work
+      return undefined
+    },
+    on(evt, cb) { (listeners[evt] ??= []).push(cb); return () => {} },
+    provide(name, svc) { services[name] = svc },
+    inject() {},
+    effect() { return () => {} },
+    logger: { info() {}, warn() {}, error() {} },
+    __registered: registered,
+  }
+  return ctx
+}
+
+test('W9 done <n> 同步 nextMeta（防 deadline 串项，P1-1 回归）', async (t) => {
+  const { apply } = await import('../src/index.mjs')
+  const dir = mkdtempSync(path.join(tmpdir(), 'wc-w9-'))
+  const ctx = mockCheckpointCtx()
+  apply(ctx, { workDir: dir })
+  const cmd = ctx.__registered.find((d) => d.name === 'checkpoint')
+  t.after(() => { try { rmSync(dir, { recursive: true, force: true }) } catch {} })
+
+  await cmd.handler({ rawInput: 'next 任务一' })
+  await cmd.handler({ rawInput: 'next 任务二' })
+  // 给任务一补 deadline（work_state 工具路径模拟：next 后补 meta）
+  const store = openWorkStore({ dir })
+  const sid = scopeIdForCwd('D:\\ws\\wc-golden')
+  let st = store.get({ scopeId: sid })
+  st = store.save({ scopeId: sid, nextMeta: [{ deadline: '2026-09-10', deliverable: 'deliverable.md' }, null] })
+  assert.equal(st.nextSteps.length, 2)
+  assert.deepEqual(st.nextMeta[0], { deadline: '2026-09-10', deliverable: 'deliverable.md' })
+
+  // done 1：任务一完成 → nextSteps=[任务二]，nextMeta 必须同步移除第 0 项
+  const r = await cmd.handler({ rawInput: 'done 1' })
+  assert.ok(r.kind === 'success', r.text)
+  st = store.get({ scopeId: sid })
+  assert.deepEqual(st.nextSteps, ['任务二'])
+  assert.equal(st.nextMeta.length, 1, 'nextMeta 应与 nextSteps 同步收缩')
+  assert.equal(st.nextMeta[0], null, '剩余条目的 meta 不应串位')
+
+  // 再 next + deadline：应落在新条目（index 0），而非旧条目
+  await cmd.handler({ rawInput: 'next 任务三' })
+  st = store.save({ scopeId: sid, nextMeta: [{ deadline: '2026-09-20', deliverable: 'x.md' }, null] })
+  assert.deepEqual(st.nextMeta[0], { deadline: '2026-09-20', deliverable: 'x.md' }, '新 meta 应落在新 next 上（不串到任务二）')
+  store.close()
+})
+
+test('W10 clear 全字段重置（focus/nextMeta/completedSteps 同步清，P1-2 回归）', async (t) => {
+  const { apply } = await import('../src/index.mjs')
+  const dir = mkdtempSync(path.join(tmpdir(), 'wc-w10-'))
+  const ctx = mockCheckpointCtx()
+  apply(ctx, { workDir: dir })
+  const cmd = ctx.__registered.find((d) => d.name === 'checkpoint')
+  t.after(() => { try { rmSync(dir, { recursive: true, force: true }) } catch {} })
+
+  await cmd.handler({ rawInput: 'goal 测试目标' })
+  await cmd.handler({ rawInput: 'focus 当前焦点' })
+  await cmd.handler({ rawInput: 'next 待办一' })
+  await cmd.handler({ rawInput: 'done 1' })
+  await cmd.handler({ rawInput: 'decision 一个决策' })
+
+  const store = openWorkStore({ dir })
+  const sid = scopeIdForCwd('D:\\ws\\wc-golden')
+  let st = store.get({ scopeId: sid })
+  assert.equal(st.focus, '当前焦点')
+  assert.equal(st.completedSteps.length, 1)
+
+  const r = await cmd.handler({ rawInput: 'clear' })
+  assert.ok(r.kind === 'success', r.text)
+  st = store.get({ scopeId: sid })
+  assert.equal(st.goal, '')
+  assert.equal(st.status, 'planned')
+  assert.equal(st.focus, null, 'focus 应被清空')
+  assert.equal(st.nextSteps.length, 0)
+  assert.equal(st.nextMeta.length, 0, 'nextMeta 应被清空')
+  assert.equal(st.completedSteps.length, 0, 'completedSteps 应被清空')
+  assert.equal(st.decisions.length, 0)
+  store.close()
+})

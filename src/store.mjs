@@ -10,6 +10,7 @@
 import { DatabaseSync } from 'node:sqlite'
 import { mkdirSync, existsSync } from 'node:fs'
 import path from 'node:path'
+import { homedir as osHomedir } from 'node:os'
 
 const PRAGMAS = 'PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; PRAGMA synchronous = NORMAL;'
 
@@ -54,9 +55,16 @@ export const WORK_STATUSES = Object.freeze(['planned', 'active', 'blocked', 'pau
  * @returns {object} WorkState Provider 句柄
  */
 export function openWorkStore(opts = {}) {
-  const dir = opts.dir ?? path.join(process.env.DSH_HOME || '', 'dsh-work-continuity')
+  // P2-2 根治（2026-09-07 审计）：dir 空值/缺省必须落到稳定绝对路径——
+  // 旧实现 path.join("", ...) 相对 cwd 落库（曾致仓库内 work.db 残留）；
+  // 解析顺序：opts.dir → $DSH_HOME/dsh-work-continuity → ~/.dsh/dsh-work-continuity（终兜底）
+  const home = process.env.DSH_HOME || path.join(osHomedir(), '.dsh')
+  const dir = (opts.dir && String(opts.dir).trim())
+    ? String(opts.dir).trim()
+    : path.join(home, 'dsh-work-continuity')
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-  const db = new DatabaseSync(path.join(dir, 'work.db'))
+  const dbPath = path.join(dir, 'work.db')
+  const db = new DatabaseSync(dbPath)
   db.exec(PRAGMAS)
   db.exec(SCHEMA)
   // 迁移：completed_steps（P1-3 完成率闭环）。列已存在时 ALTER 抛错，忽略即可。
@@ -172,7 +180,7 @@ export function openWorkStore(opts = {}) {
 
   function close() { db.close() }
 
-  return { db, get, save, close, list, appendAudit, auditStats }
+  return { db, dbPath, get, save, close, list, appendAudit, auditStats }
 }
 
 function toWorkState(row) {
