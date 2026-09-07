@@ -61,6 +61,8 @@ export function openWorkStore(opts = {}) {
   db.exec(SCHEMA)
   // 迁移：completed_steps（P1-3 完成率闭环）。列已存在时 ALTER 抛错，忽略即可。
   try { db.exec("ALTER TABLE work_state ADD COLUMN completed_steps TEXT NOT NULL DEFAULT '[]'") } catch { /* 已迁移 */ }
+  // 2026-09-07：next_meta（与 next_steps 下标对齐：deadline/deliverable）。列已存在时忽略。
+  try { db.exec("ALTER TABLE work_state ADD COLUMN next_meta TEXT NOT NULL DEFAULT '[]'") } catch { /* 已迁移 */ }
 
   /** WorkState 键：scope_id + project_id */
   function keyOf(scopeId, projectId = '') {
@@ -103,6 +105,7 @@ export function openWorkStore(opts = {}) {
       checkpoints: JSON.stringify(input.checkpoints ?? JSON.parse(existing?.checkpoints ?? '[]')),
       unresolved: JSON.stringify(input.unresolved ?? JSON.parse(existing?.unresolved ?? '[]')),
       next_steps: JSON.stringify(input.nextSteps ?? JSON.parse(existing?.next_steps ?? '[]')),
+      next_meta: JSON.stringify(input.nextMeta ?? JSON.parse(existing?.next_meta ?? '[]')),
       artifacts: JSON.stringify(input.artifacts ?? JSON.parse(existing?.artifacts ?? '[]')),
       completed_steps: JSON.stringify(input.completedSteps ?? JSON.parse(existing?.completed_steps ?? '[]')),
       handoff: input.handoff !== undefined ? JSON.stringify(input.handoff) : (existing?.handoff ?? null),
@@ -121,6 +124,7 @@ export function openWorkStore(opts = {}) {
         && existing.checkpoints === payload.checkpoints
         && existing.unresolved === payload.unresolved
         && existing.next_steps === payload.next_steps
+        && (existing.next_meta ?? '[]') === payload.next_meta
         && existing.artifacts === payload.artifacts
         && (existing.completed_steps ?? '[]') === payload.completed_steps
         && (existing.handoff ?? null) === (payload.handoff ?? null)
@@ -133,12 +137,12 @@ export function openWorkStore(opts = {}) {
     db.prepare(`
       INSERT OR REPLACE INTO work_state (
         id, scope_id, project_id, goal, status, focus, decisions, checkpoints,
-        unresolved, next_steps, artifacts, completed_steps, handoff, version, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        unresolved, next_steps, next_meta, artifacts, completed_steps, handoff, version, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       payload.id, payload.scope_id, payload.project_id, payload.goal, payload.status,
       payload.focus, payload.decisions, payload.checkpoints, payload.unresolved,
-      payload.next_steps, payload.artifacts, payload.completed_steps, payload.handoff, payload.version,
+      payload.next_steps, payload.next_meta, payload.artifacts, payload.completed_steps, payload.handoff, payload.version,
       payload.created_at, payload.updated_at,
     )
     appendAudit({ op: 'save', scopeId: input.scopeId, detail: 'version=' + payload.version })
@@ -183,6 +187,7 @@ function toWorkState(row) {
     checkpoints: JSON.parse(row.checkpoints),
     unresolved: JSON.parse(row.unresolved),
     nextSteps: JSON.parse(row.next_steps),
+    nextMeta: JSON.parse(row.next_meta ?? '[]'),
     artifacts: JSON.parse(row.artifacts),
     completedSteps: JSON.parse(row.completed_steps ?? '[]'),
     handoff: row.handoff ? JSON.parse(row.handoff) : null,
