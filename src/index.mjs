@@ -354,7 +354,7 @@ const INJECT_UNRESOLVED_MAX = 2
 const INJECT_UNRESOLVED_CHARS = 80
 
 /** 紧凑 WorkState 摘要（pre-step 注入用；空/全空返回 ''） */
-function renderWorkStateBrief(state) {
+export function renderWorkStateBrief(state) {
   if (!state) return ''
   const lines = []
   const goal = String(state.goal ?? '').trim()
@@ -369,7 +369,18 @@ function renderWorkStateBrief(state) {
   if (focus) head.push('focus: ' + truncateStr(focus, INJECT_FOCUS_MAX))
   lines.push('[work-state] ' + head.join(' | '))
   if (next.length > 0) {
-    lines.push('next: ' + next.slice(0, INJECT_NEXT_MAX).map((n) => truncateStr(String(n), INJECT_NEXT_CHARS)).join(' / '))
+    // T4 M4.5（2026-09-07）：next_meta 下标对齐渲染——deadline 附 (dl YYYY-MM-DD)，
+    // 已过期附 ⚠ 标记（ISO 日期字典序比较；meta 缺失/越界/非对象 → 原样，不炸注入）
+    const meta = Array.isArray(state.nextMeta) ? state.nextMeta : []
+    const today = new Date().toISOString().slice(0, 10)
+    lines.push('next: ' + next.slice(0, INJECT_NEXT_MAX).map((n, i) => {
+      const base = truncateStr(String(n), INJECT_NEXT_CHARS)
+      const m = meta[i]
+      if (!m || typeof m !== 'object' || !m.deadline) return base
+      const dl = String(m.deadline).trim().slice(0, 10)
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(dl)) return base
+      return dl < today ? base + '（⚠ 逾期 ' + dl + '）' : base + '（dl ' + dl + '）'
+    }).join(' / '))
   }
   if (decisions.length > 0) {
     lines.push('decided: ' + decisions.slice(0, INJECT_DECISION_MAX)

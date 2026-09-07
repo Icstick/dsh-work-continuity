@@ -15,7 +15,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { openWorkStore } from '../src/store.mjs'
-import { WC_SECTION_KEY, registerWorkStateSection, scopeIdForCwd, renderWorkStateExport } from '../src/index.mjs'
+import { WC_SECTION_KEY, registerWorkStateSection, scopeIdForCwd, renderWorkStateExport, renderWorkStateBrief } from '../src/index.mjs'
 
 function fresh(t) {
   const dir = mkdtempSync(path.join(tmpdir(), 'wc-golden-'))
@@ -208,4 +208,31 @@ test('W10 clear 全字段重置（focus/nextMeta/completedSteps 同步清，P1-2
   assert.equal(st.completedSteps.length, 0, 'completedSteps 应被清空')
   assert.equal(st.decisions.length, 0)
   store.close()
+})
+
+// ---- W11/W12（2026-09-07 T4 M4.5）：注入摘要 deadline 渲染 + 逾期标记 ----
+
+test('W11 next 带 nextMeta deadline → 摘要渲染 (dl 日期)；未到期无警告', () => {
+  const in10d = new Date(Date.now() + 10 * 86400000).toISOString().slice(0, 10)
+  const out = renderWorkStateBrief({
+    scopeId: 's', goal: '目标', status: 'active',
+    nextSteps: ['任务一', '任务二'],
+    nextMeta: [{ deadline: in10d, deliverable: '交付.md' }, null],
+    decisions: [], unresolved: [],
+  })
+  assert.ok(out.includes('next: 任务一（dl ' + in10d + '） / 任务二'), '未到期附 (dl)，meta 越界项原样')
+  assert.ok(!out.includes('⚠'), '未到期无逾期标记')
+})
+
+test('W12 deadline 已过期 → ⚠ 逾期标记；非法日期格式原样', () => {
+  const past = new Date(Date.now() - 86400000).toISOString().slice(0, 10)
+  const out = renderWorkStateBrief({
+    scopeId: 's', goal: 'g', status: 'active',
+    nextSteps: ['过期任务', '格式怪任务'],
+    nextMeta: [{ deadline: past }, { deadline: '不是日期' }],
+    decisions: [], unresolved: [],
+  })
+  assert.ok(out.includes('（⚠ 逾期 ' + past + '）'), '过期附逾期标记')
+  assert.ok(out.includes('格式怪任务'), '非法日期原样不炸')
+  assert.ok(!out.includes('不是日期'), '非法日期不渲染')
 })
