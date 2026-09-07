@@ -220,7 +220,7 @@ function phaseToStatus(phase) {
 const WORK_TOOL_ACTIONS = [
   'goal <text>', 'decision <text>', 'next <text>', 'artifact <path>',
   'unresolved <text>', 'focus <text>', 'status <planned|active|blocked|paused|done>',
-  'done <n>', 'show', 'clear',
+  'done <n>', 'show', 'export', 'clear',
 ].join(' | ')
 
 /** work_state 工具注册（tools 可选服务，缺失自动跳过——headless 无 tools） */
@@ -237,14 +237,22 @@ function registerWorkTool(ctx, store) {
         action: {
           type: 'string',
           required: true,
-          enum: ['goal', 'decision', 'next', 'artifact', 'unresolved', 'focus', 'status', 'done', 'show', 'clear'],
+          enum: ['goal', 'decision', 'next', 'artifact', 'unresolved', 'focus', 'status', 'done', 'show', 'export', 'clear'],
           description: '要执行的操作：goal=设/改目标；decision=记录决策；next=加下一步；'
             + 'artifact=记录产物；unresolved=记录未决问题；focus=设当前焦点；'
-            + 'status=更新状态；done=标记第 n 个 next 完成；show=查看当前状态；clear=清空',
+            + 'status=更新状态；done=标记第 n 个 next 完成；show=查看当前状态；export=导出 md 快照；clear=清空',
         },
         text: {
           type: 'string',
           description: 'action 为 goal/decision/next/artifact/unresolved/focus 时的内容',
+        },
+        deadline: {
+          type: 'string',
+          description: 'action=next 时的截止时间（ISO 8601 或 YYYY-MM-DD），逾期不改期、保留原记录并写新原因',
+        },
+        deliverable: {
+          type: 'string',
+          description: 'action=next 时的交付物（可验收产物，完成判据=实测结果/文件而非口头自报）',
         },
         status: {
           type: 'string',
@@ -276,6 +284,14 @@ function registerWorkTool(ctx, store) {
         try {
           exec?.signal?.throwIfAborted?.()
           const action = typeof args.action === 'string' ? args.action : ''
+          const sessionCwd = exec?.agent?.session?.cwd
+            ?? (typeof ctx.get === 'function' ? ctx.get('session')?.cwd : undefined)
+          // export：无副作用，直接渲染 md 快照（可落盘/进 git）
+          if (action === 'export') {
+            const sid = scopeIdForCwd(sessionCwd)
+            const st = getStateCompat(store, sid)
+            return { ok: true, text: renderWorkStateExport(st) }
+          }
           // 组 rawInput，复用 handleCheckpoint（同一 store/渲染/审计）
           let raw = ''
           if (action === 'show' || action === 'clear' || action === 'status') {
@@ -289,13 +305,32 @@ function registerWorkTool(ctx, store) {
             const text = typeof args.text === 'string' ? args.text.trim() : ''
             raw = text ? action + ' ' + text : action
           }
-          const sessionCwd = exec?.agent?.session?.cwd
-            ?? (typeof ctx.get === 'function' ? ctx.get('session')?.cwd : undefined)
           const toolCtx = {
             get: (name) => (name === 'session' ? { cwd: sessionCwd } : undefined),
             logger: ctx.logger,
           }
           const result = await handleCheckpoint(store, { rawInput: raw }, toolCtx)
+          // next + deadline/deliverable：补写 next_meta（与 next_steps 下标对齐，最后一项）
+          if (action === 'next' && result?.kind === 'success'
+              && (args.deadline !== undefined || args.deliverable !== undefined)) {
+            try {
+              const sid = scopeIdForCwd(sessionCwd)
+              const st = store.get({ scopeId: sid })
+              if (st && Array.isArray(st.nextSteps) && st.nextSteps.length > 0) {
+                const meta = Array.isArray(st.nextMeta) ? [...st.nextMeta] : []
+                while (meta.length < st.nextSteps.length) meta.push(null)
+                const idx = st.nextSteps.length - 1
+                const cur = (meta[idx] && typeof meta[idx] === 'object') ? { ...meta[idx] } : {}
+                if (args.deadline !== undefined) cur.deadline = String(args.deadline).trim()
+                if (args.deliverable !== undefined) cur.deliverable = String(args.deliverable).trim()
+                meta[idx] = cur
+                store.save({ scopeId: sid, nextMeta: meta })
+              }
+            } catch (metaErr) {
+              ctx.logger?.warn?.('[work-continuity] wc:degraded next_meta_failed reason='
+                + (metaErr instanceof Error ? metaErr.message : String(metaErr)))
+            }
+          }
           return { ok: result?.kind === 'success', text: String(result?.text ?? '') }
         } catch (err) {
           ctx.logger?.warn?.('[work-continuity] wc:degraded work_tool_failed reason='
@@ -634,7 +669,12 @@ function renderWorkState(state) {
   }
   if (state.nextSteps.length) {
     lines.push('next steps:')
-    state.nextSteps.forEach((s, i) => lines.push(`  ${i + 1}. ${s}`))
+    state.nextSteps.forEach((s, i) => {
+      const m = Array.isArray(state.nextMeta) ? state.nextMeta[i] : undefined
+      const tag = m?.deadline ? '（截止 ' + m.deadline + '）' : ''
+      const del = m?.deliverable ? ' [交付: ' + m.deliverable + ']' : ''
+      lines.push('  ' + (i + 1) + '. ' + s + tag + del)
+    })
   }
   if (state.unresolved.length) {
     lines.push('unresolved:')
@@ -645,6 +685,49 @@ function renderWorkState(state) {
     state.artifacts.forEach((a, i) => lines.push(`  ${i + 1}. ${a}`))
   }
   return lines.filter(Boolean).join('\n')
+}
+
+/** 渲染 WorkState 为 Markdown 快照（action=export；可落盘/进 git 做 diff/review） */
+export function renderWorkStateExport(state) {
+  if (!state) return '(no work state)'
+  const date = new Date().toISOString().slice(0, 10)
+  const lines = [
+    '# WorkState 快照（' + date + '）',
+    '',
+    '- scope: ' + state.scopeId + '  |  status: ' + state.status + '  |  version: ' + state.version,
+    '',
+    '## goal',
+    state.goal || '（无）',
+  ]
+  if (state.focus) lines.push('', '## focus', state.focus)
+  if (state.decisions?.length) {
+    lines.push('', '## decisions')
+    state.decisions.forEach((d, i) => lines.push(String(i + 1) + '. ' + (d?.text ?? '')))
+  }
+  if (state.nextSteps?.length) {
+    lines.push('', '## next steps')
+    state.nextSteps.forEach((s, i) => {
+      const m = Array.isArray(state.nextMeta) ? state.nextMeta[i] : undefined
+      let row = String(i + 1) + '. ' + s
+      if (m?.deadline) row += '（截止 ' + m.deadline + '）'
+      if (m?.deliverable) row += '  → 交付: ' + m.deliverable
+      lines.push(row)
+    })
+  }
+  if (state.artifacts?.length) {
+    lines.push('', '## artifacts')
+    state.artifacts.forEach((a, i) => lines.push(String(i + 1) + '. ' + a))
+  }
+  if (state.unresolved?.length) {
+    lines.push('', '## open')
+    state.unresolved.forEach((u, i) => lines.push(String(i + 1) + '. ' + u))
+  }
+  if (state.completedSteps?.length) {
+    lines.push('', '## completed')
+    state.completedSteps.forEach((c) => lines.push('- ' + (c?.text ?? '') + '（' + String(c?.at ?? '').slice(0, 10) + '）'))
+  }
+  lines.push('', '_via dsh-work-continuity /checkpoint export_')
+  return lines.join('\n')
 }
 
 /**

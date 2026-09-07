@@ -15,7 +15,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { openWorkStore } from '../src/store.mjs'
-import { WC_SECTION_KEY, registerWorkStateSection, scopeIdForCwd } from '../src/index.mjs'
+import { WC_SECTION_KEY, registerWorkStateSection, scopeIdForCwd, renderWorkStateExport } from '../src/index.mjs'
 
 function fresh(t) {
   const dir = mkdtempSync(path.join(tmpdir(), 'wc-golden-'))
@@ -89,3 +89,35 @@ test('W6 调度器 section 接线导出存在（防误删契约）', () => {
   assert.equal(typeof registerWorkStateSection, 'function')
   assert.equal(typeof scopeIdForCwd, 'function')
 })
+test('W7 nextMeta 与 nextSteps 下标对齐存取（deadline/deliverable 防丢）', (t) => {
+  const store = fresh(t)
+  store.save({ scopeId: 's', goal: 'g', nextSteps: ['任务一', '任务二'] })
+  const upd = store.save({ scopeId: 's', nextMeta: [{ deadline: '2026-09-10', deliverable: '报告.md' }, null] })
+  assert.equal(upd.nextSteps.length, 2)
+  assert.deepEqual(upd.nextMeta[0], { deadline: '2026-09-10', deliverable: '报告.md' })
+  assert.equal(upd.nextMeta[1], null)
+  const again = store.save({ scopeId: 's', status: 'active' })
+  assert.deepEqual(again.nextMeta[0], { deadline: '2026-09-10', deliverable: '报告.md' })
+})
+
+test('W8 export 渲染为 Markdown 快照', () => {
+  const state = {
+    scopeId: 'ws:abc', status: 'active', version: 3,
+    goal: '黄金回归集落地', focus: '跑测试',
+    decisions: [{ text: '锚定 store 契约' }],
+    nextSteps: ['合并', '发布'],
+    nextMeta: [{ deadline: '2026-09-10', deliverable: 'release notes' }, null],
+    artifacts: ['docs/a.md'], unresolved: ['版本策略'],
+    completedSteps: [{ text: '写用例', at: '2026-09-07T00:00:00.000Z' }],
+  }
+  const md = renderWorkStateExport(state)
+  assert.ok(md.startsWith('# WorkState 快照'))
+  assert.ok(md.includes('黄金回归集落地'))
+  assert.ok(md.includes('1. 合并（截止 2026-09-10）  → 交付: release notes'))
+  assert.ok(md.includes('2. 发布'))
+  assert.ok(md.includes('锚定 store 契约'))
+  assert.ok(md.includes('docs/a.md'))
+  assert.ok(md.includes('版本策略'))
+  assert.ok(md.includes('写用例'))
+})
+
