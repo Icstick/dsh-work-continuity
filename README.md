@@ -13,7 +13,7 @@ DeepSeek Harness (dsh) 的 **Work Continuity** 插件——跨会话的工作状
 
 Work Continuity 把工作状态变成**不用你记得记**的事：目标、决策、下一步，工作自己留下痕迹；下次会话打开，agent 已经知道你在追什么。
 
-## 三种捕获方式（v0.1.1+，2026-09-02/03）
+## 三种捕获方式（v0.2.0）
 
 早期版本只靠人敲 `/checkpoint` 命令——审计发现**装了一周只有 1 次冒烟写入**：功能不坏，是"要人记得敲命令"这件事本身不成立。现在有三层，互相兜底：
 
@@ -26,6 +26,7 @@ Work Continuity 把工作状态变成**不用你记得记**的事：目标、决
 - goal/change 事件会**建档/更新**目标与状态（complete→done、pause→paused…，clear 清空）；
 - todo/write 事件只在**该工作区还没有任何 WorkState** 时自动建档（nextSteps 取自未完成任务）——已有手记内容不被每轮全量替换的 todo 覆盖；
 - 每轮 pre-step 注入紧凑摘要（goal/status/focus/下一步，~150 token），LLM 由此知道"正在追踪什么"，在节点主动用 `work_state` 工具更新；无状态或已完成（done）不注入。
+- **注入调度器接线（v0.2.0，S1-P7 2026-09-05）**：宿主 dsh-inject-scheduler 可用时注册 `wc.work_state` 段并按实际注入量上报；未挂 scheduler 时回退为 pre-step 直接注入（两路径互斥不叠加）。
 
 > 小故事：昨天你说"想给工具箱加个 FFT 工具"就睡了。当时 agent 顺手把这个构想记进了 next steps。今天新会话一开，agent 第一眼就看到 `[work-state] goal: 电子工具箱…`——不用你重复半句，直接接着昨天的话往下干。
 
@@ -53,11 +54,13 @@ Work Continuity 把工作状态变成**不用你记得记**的事：目标、决
 | `/checkpoint status <状态>` | 更新进度状态 | `/checkpoint status active`（planned/active/blocked/paused/done） |
 | `/checkpoint focus <内容>` | 设置当前焦点 | `/checkpoint focus 修回归` |
 | `/checkpoint show` | 查看当前工作状态 | `/checkpoint show` |
-| `/checkpoint clear` | 清空 | `/checkpoint clear` |
+| `/checkpoint done <n>` | 标记第 n 个下一步已完成（与 next_meta 下标对齐，清其 deadline/deliverable） | `/checkpoint done 1` |
+| `/checkpoint stats` | 使用统计（写入次数 / 完成率 / 各 scope 概览） | `/checkpoint stats` |
+| `/checkpoint clear` | 清空（重置全部字段，P1-2） | `/checkpoint clear` |
 
 ### work_state 模型工具（LLM 侧，同数据）
 
-模型可见工具 `work_state` 与 `/checkpoint` 共享同一 store/渲染/审计：action 支持 goal/decision/next/artifact/unresolved/focus/status/done/show/clear。工具描述明确告诉模型：用户提出新构想/目标、工作到值得追踪的节点、需要跨会话记住进度时调用；琐碎单步不要记。
+模型可见工具 `work_state` 与 `/checkpoint` 共享同一 store/渲染/审计：action 支持 goal/decision/next/artifact/unresolved/focus/status/done/show/export/clear。`next` 可带 `deadline`（ISO 日期或 YYYY-MM-DD）与 `deliverable`（交付物/验收判据——完成判据=实测结果而非口头自报），写入 next_meta 与 next_steps 下标对齐（P1-1）。注入摘要中的到期渲染/逾期标注在后续排期。工具描述明确告诉模型：用户提出新构想/目标、工作到值得追踪的节点、需要跨会话记住进度时调用；琐碎单步不要记。
 
 ## 设计取舍
 
@@ -156,6 +159,7 @@ pnpm install
 ## 数据位置
 
 - `workDir/work.db`（SQLite 单文件）——全部工作状态
+- 未配置 workDir 时落 `$DSH_HOME/dsh-work-continuity/`，终兜底 `~/.dsh/dsh-work-continuity/`（P2-2 根治 2026-09-07：旧实现曾相对 cwd 落库，仓库内残留 work.db 已清）
 - **数据是你的**：卸载不删；装回来即恢复
 
 ## 卸载
@@ -169,7 +173,7 @@ pnpm install
 | 症状 | 原因 / 处理 |
 |---|---|
 | /checkpoint 命令不存在 | commands 服务随 bundle 加载顺序可能晚于插件就绪——插件会等它出现再注册；还不行就检查 bundle 挂载 |
-| 数据落在意外位置 | workDir 没显式配置（默认回退 DSH_HOME，环境变量不可靠）——务必显式配置 |
+| 数据落在意外位置 | 旧版本曾相对 cwd 落库（P2-2 已根治，仓库内残留已清）；workDir 建议显式配置，未配置按 `$DSH_HOME/dsh-work-continuity` → `~/.dsh/dsh-work-continuity` 兜底（稳定绝对路径） |
 
 ## 开发
 
@@ -181,9 +185,9 @@ node test/work.test.mjs
 
 MIT License。参考项目致谢见 [ACKNOWLEDGMENTS.md](ACKNOWLEDGMENTS.md)。
 
-## 设置页配置卡片（v0.1.1+）
+## 设置页（顶层 section，v0.2.0）
 
-- 位置：DSH Web **设置 → 插件 → 插件配置**（`work-continuity` 卡片）
+- 位置：DSH Web **设置 → 顶层 section「工作连续性（Work Continuity）」**（与费用/Vision Router 同层，v0.2.0 起）
 - 机制：host 侧注册 settings namespace（`work-continuity`），client bundle（`lib/client.js`，
   由 `node scripts/build-client.mjs` 生成）注册设置卡片；保存写入 settings.yaml
 - 生效语义：**保存后重启生效**（apply 时 settings 值覆盖 cordis Config）
