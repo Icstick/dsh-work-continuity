@@ -1,7 +1,7 @@
 {
   "name": "dsh-work-continuity",
   "description": "Work Continuity for DSH — goal/decisions/checkpoints/next-steps as explicit WorkState, decoupled from generic memory",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "type": "module",
   "main": "./src/index.mjs",
   "exports": {
