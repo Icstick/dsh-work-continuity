@@ -30,7 +30,7 @@ function fakeScheduler(overrides = {}) {
   }
 }
 
-test('S1-P7 registerWorkStateSection：就绪即注册（参数契约：wc.work_state / order 20 / 0=未设上限 / chars）', (t) => {
+test('S1-P7 registerWorkStateSection：就绪即注册（参数契约：wc.work_state / order 20 / 0=未设上限 / chars）', () => {
   const sched = fakeScheduler()
   const ctx = mockCtx({ injectScheduler: sched })
   registerWorkStateSection(ctx)
@@ -45,7 +45,7 @@ test('S1-P7 registerWorkStateSection：就绪即注册（参数契约：wc.work_
   })
 })
 
-test('S1-P7 registerWorkStateSection：未就绪 → 订阅 internal/service，就绪事件到达后注册', (t) => {
+test('S1-P7 registerWorkStateSection：未就绪 → 订阅 internal/service，就绪事件到达后注册', () => {
   const handlers = []
   const services = {}
   const ctx = mockCtx(services, handlers)
@@ -63,7 +63,7 @@ test('S1-P7 registerWorkStateSection：scheduler 从未出现 → 静默', () =>
   assert.doesNotThrow(() => registerWorkStateSection(ctx))
 })
 
-test('S1-P7 reportWorkStateUsage：上报 body 实际字符', async (t) => {
+test('S1-P7 reportWorkStateUsage：上报 body 实际字符', async () => {
   const sched = fakeScheduler()
   const ctx = mockCtx({ injectScheduler: sched })
   const body = '[work-state] goal: P7 接入 | next: 提交 / 验证'
@@ -77,7 +77,7 @@ test('S1-P7 reportWorkStateUsage：上报 body 实际字符', async (t) => {
   })
 })
 
-test('S1-P7 reportWorkStateUsage：空 sessionId → 不传（global 槽）', async (t) => {
+test('S1-P7 reportWorkStateUsage：空 sessionId → 不传（global 槽）', async () => {
   const sched = fakeScheduler()
   const ctx = mockCtx({ injectScheduler: sched })
   reportWorkStateUsage(ctx, '', '内容')
@@ -85,7 +85,7 @@ test('S1-P7 reportWorkStateUsage：空 sessionId → 不传（global 槽）', as
   assert.equal(Object.hasOwn(sched.calls.usage[0], 'sessionId'), false)
 })
 
-test('S1-P7 reportWorkStateUsage：空 body / scheduler 缺失 / recordUsage 故障 → 全部 fail-open', async (t) => {
+test('S1-P7 reportWorkStateUsage：空 body / scheduler 缺失 / recordUsage 故障 → 全部 fail-open', async () => {
   const base = fakeScheduler()
   const sched = {
     ...base,

@@ -80,7 +80,7 @@ function mockCtx({ commandsAtStart }) {
   return ctx
 }
 
-test('apply 时 commands 已就绪 → 立即注册', async (t) => {
+test('apply 时 commands 已就绪 → 立即注册', async () => {
   const apply = wcApply
   const registered = []
   const ctx = mockCtx({ commandsAtStart: { register: (def) => registered.push(def) } })
@@ -90,7 +90,7 @@ test('apply 时 commands 已就绪 → 立即注册', async (t) => {
   assert.equal(typeof registered[0].handler, 'function')
 })
 
-test('apply 时 commands 未就绪 → internal/service 事件后注册（2026-08-27 正式实例教训）', async (t) => {
+test('apply 时 commands 未就绪 → internal/service 事件后注册（2026-08-27 正式实例教训）', async () => {
   const { apply } = await import('../src/index.mjs')
   const registered = []
   const ctx = mockCtx({ commandsAtStart: undefined })
@@ -104,7 +104,7 @@ test('apply 时 commands 未就绪 → internal/service 事件后注册（2026-0
   assert.equal(registered.length, 1)
   assert.equal(registered[0].name, 'checkpoint')
 })
-test('handleCheckpoint：ctx 无 session 服务时不抛 without inject（2026-08-27 正式实例教训）', async (t) => {
+test('handleCheckpoint：ctx 无 session 服务时不抛 without inject（2026-08-27 正式实例教训）', async () => {
   const { apply } = await import('../src/index.mjs')
   const registered = []
   const ctx = mockCtx({ commandsAtStart: { register: (def) => registered.push(def) } })
@@ -323,7 +323,7 @@ test('P1-6 pre-step 注入：无 state / done / 非 step1 → 不注入', async 
 })
 
 // ---- P2-2 回归（2026-09-07 审计）：openWorkStore dir 空值兜底，不落 cwd ----
-test('openWorkStore：dir 缺省/空值不落 cwd（回退 DSH_HOME 或 ~/.dsh）', (t) => {
+test('openWorkStore：dir 缺省/空值不落 cwd（回退 DSH_HOME 或 ~/.dsh）', () => {
   const d1 = mkdtempSync(path.join(tmpdir(), 'wc-dir-ok-'))
   const s1 = openWorkStore({ dir: d1 })
   assert.ok(s1.dbPath.includes(d1))

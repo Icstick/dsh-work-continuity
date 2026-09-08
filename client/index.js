@@ -130,11 +130,11 @@ function makeSection(scope) {
     function discard() { setDrafts(null); setFailed(false) }
     function onDraft(name, text) {
       setFailed(false)
-      setDrafts((prev) => { const next = { ...(prev ?? {}) }; next[name] = text; return next })
+      setDrafts((prev) => { const next = { ...prev }; next[name] = text; return next })
     }
     function onReset(name) {
       setFailed(false)
-      setDrafts((prev) => { const next = { ...(prev ?? {}) }; next[name] = ''; return next })
+      setDrafts((prev) => { const next = { ...prev }; next[name] = ''; return next })
     }
 
     return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '2px' } },

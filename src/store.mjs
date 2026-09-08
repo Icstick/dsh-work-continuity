@@ -1,6 +1,6 @@
 // src/store.mjs — WorkState SQLite Provider（node:sqlite，零依赖）。
 //
-// WorkState 与 User Memory 分库逻辑上分离（CONTRACTS.md §5）：
+// WorkState 与 User Memory 分库逻辑上分离（契约 CONTRACTS.md §5，见 my-plugins/acp-docs/）：
 // - 当前工作状态（goal/decisions/checkpoints/...）是 project state，
 //   不应被向量 recall 的偶然相关度决定是否存在
 // - MVP 只通过 /checkpoint 显式持久化（human-checkable，不每 turn LLM 总结）
@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS work_audit (
 CREATE INDEX IF NOT EXISTS idx_work_audit_ts ON work_audit (ts);
 `
 
-/** 状态枚举（CONTRACTS.md §5） */
+/** 状态枚举（契约 CONTRACTS.md §5，见 my-plugins/acp-docs/） */
 export const WORK_STATUSES = Object.freeze(['planned', 'active', 'blocked', 'paused', 'done'])
 
 /**

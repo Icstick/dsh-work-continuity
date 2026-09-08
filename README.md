@@ -64,7 +64,7 @@ Work Continuity 把工作状态变成**不用你记得记**的事：目标、决
 
 ## 设计取舍
 
-**人可核对是底线**：无论哪层捕获，写进 work.db 的每一条都可以 `/checkpoint show` 查、`work_audit` 审计回溯，绝不做不可见的"每轮 LLM 总结"。
+**人可核对是底线**：无论哪层捕获，写进 work.db 的每一条都可以 `/checkpoint show` 查；全部写入在 `work_audit` 留痕（`/checkpoint stats` 聚合可见），绝不做不可见的"每轮 LLM 总结"。
 
 演进路径：MVP 只做显式命令（`/checkpoint`）→ 发现没人记得敲 → 加事件自动捕获（goal/change、todo/write，**确定性触发、无 LLM 猜测**）→ 再补 LLM 自主决断（`work_state` 工具 + 摘要注入，覆盖自然语言构想）。
 

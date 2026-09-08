@@ -1,10 +1,10 @@
 // dsh-work-continuity — function plugin entry。
 //
-// Work Continuity（CONTRACTS.md §5）：WorkState 与 User Memory 分库逻辑上分离。
+// Work Continuity（契约 CONTRACTS.md §5，见 my-plugins/acp-docs/）：WorkState 与 User Memory 分库逻辑上分离。
 // MVP：/checkpoint 命令显式持久化 goal/decisions/next_steps/artifacts，
 //      human-checkable，不每 turn LLM 总结。
 //
-// 参考 memento 的 /memory 命令模式：commands 是可选的 host 服务，
+// commands 是可选的 host 服务（服务就绪回调，见下方 withService），
 // 缺失（headless）自动跳过。
 
 import { createHash, randomUUID } from 'node:crypto'
@@ -55,16 +55,10 @@ const USAGE = [
   '  clear               清空（重置为初始状态）',
 ].join('\n')
 
-/** 命令描述（en/zh） */
+/** /checkpoint 命令描述（中文——与 ACP 命令及 work_state 工具一致；宿主无 per-locale 选择机制） */
 const COMMAND_DESCRIPTION = {
-  en: {
-    description: 'Manage the current work state (goal/decisions/next steps) for cross-session continuity',
-    hint: '/checkpoint goal <goal> | decision <text> | next <text> | show',
-  },
-  zh: {
-    description: '管理工作状态（目标/决策/下一步）以实现跨会话连续性',
-    hint: '/checkpoint goal <目标> | decision <决策> | next <下一步> | show',
-  },
+  description: '管理工作状态（目标/决策/下一步）以实现跨会话连续性',
+  hint: '/checkpoint goal <目标> | decision <决策> | next <下一步> | show',
 }
 
 export function apply(ctx, config = {}) {
@@ -87,7 +81,7 @@ export function apply(ctx, config = {}) {
   const store = openWorkStore({ dir: config.workDir })
   ctx.provide('work', createWorkService(store))
 
-  registerCheckpointCommand(ctx, store, config)
+  registerCheckpointCommand(ctx, store)
   registerAutoCapture(ctx, store)
   registerWorkTool(ctx, store)
   registerWorkStateSection(ctx)
@@ -498,7 +492,7 @@ function createWorkService(store) {
 }
 
 /**
- * 可选服务就绪即调用（对齐 dsh-memento 的 withService 模式）：
+ * 可选服务就绪即调用（host 服务异步装配，就绪回调）：
  * apply 时 commands 服务可能尚未提供（bundle 加载顺序），一次性 ctx.get 会静默跳过；
  * 必须订阅 internal/service 事件，等 commands 出现再注册（2026-08-27 正式实例实测教训）。
  */
@@ -519,13 +513,13 @@ function withService(ctx, serviceName, fn) {
 }
 
 /** /checkpoint 命令注册（commands 可选服务，缺失时等待其就绪） */
-function registerCheckpointCommand(ctx, store, config) {
+function registerCheckpointCommand(ctx, store) {
   withService(ctx, 'commands', (commands) => {
     if (!commands || typeof commands.register !== 'function') return
     commands.register({
       name: 'checkpoint',
-      description: COMMAND_DESCRIPTION.en.description,
-      input: { hint: COMMAND_DESCRIPTION.en.hint },
+      description: COMMAND_DESCRIPTION.description,
+      input: { hint: COMMAND_DESCRIPTION.hint },
       handler: async (invocation) => {
         try {
           return handleCheckpoint(store, invocation, ctx)
