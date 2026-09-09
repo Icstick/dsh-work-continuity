@@ -8,7 +8,7 @@
 // 缺失（headless）自动跳过。
 
 import { createHash, randomUUID } from 'node:crypto'
-import { openWorkStore, WORK_STATUSES } from './store.mjs'
+import { openWorkStore, WORK_STATUSES, WorkStateVersionConflictError } from './store.mjs'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
@@ -47,8 +47,11 @@ const USAGE = [
   '  next <text>         添加下一步行动',
   '  artifact <path>     记录产物路径',
   '  unresolved <text>   记录未解决问题',
-  '  status <planned|active|blocked|paused|done>  更新状态',
+  '  status <planned|active|blocked|paused|in_review|done>  更新状态',
+  '                      （in_review = 已交付待验收；done 只能由人类在此确认）',
   '  focus <text>        设置当前焦点',
+  '  handoff <text>      写交接摘要（跨会话/跨 agent）',
+  '  deadend <尝试> — <为何失败>  记录走过的死路与原因',
   '  done <n>            标记第 n 个下一步已完成',
   '  show                查看当前 WorkState',
   '  stats               使用统计（写入次数 / 完成率 / 各 scope 概览）',
@@ -58,7 +61,7 @@ const USAGE = [
 /** /checkpoint 命令描述（中文——与 ACP 命令及 work_state 工具一致；宿主无 per-locale 选择机制） */
 const COMMAND_DESCRIPTION = {
   description: '管理工作状态（目标/决策/下一步）以实现跨会话连续性',
-  hint: '/checkpoint goal <目标> | decision <决策> | next <下一步> | show',
+  hint: '/checkpoint goal <目标> | decision <决策> | next <下一步> | handoff <交接> | show',
 }
 
 export function apply(ctx, config = {}) {
@@ -213,7 +216,8 @@ function phaseToStatus(phase) {
 /** 每个 verb 的帮助（工具 description 内联，避免模型瞎猜） */
 const WORK_TOOL_ACTIONS = [
   'goal <text>', 'decision <text>', 'next <text>', 'artifact <path>',
-  'unresolved <text>', 'focus <text>', 'status <planned|active|blocked|paused|done>',
+  'unresolved <text>', 'focus <text>', 'handoff <text>', 'deadend <text>',
+  'status <planned|active|blocked|paused|in_review>',
   'done <n>', 'show', 'export', 'clear',
 ].join(' | ')
 
@@ -223,18 +227,21 @@ function registerWorkTool(ctx, store) {
     if (!tools || typeof tools.register !== 'function') return
     tools.register(defineTool({
       name: 'work_state',
-      description: '跨会话工作状态（goal/decisions/next steps/artifacts/unresolved），'
+      description: '跨会话工作状态（goal/decisions/next steps/artifacts/unresolved/handoff），'
         + '供后续会话续接工作。与 /checkpoint 命令同一数据。'
         + '当用户提出新构想/目标、工作进行到值得追踪的节点、或需要跨会话记住进度时调用；'
-        + '琐碎单步不要记。action: ' + WORK_TOOL_ACTIONS,
+        + '琐碎单步不要记。完成权分离：模型只能把目标推到 in_review，done 由人类确认。'
+        + 'action: ' + WORK_TOOL_ACTIONS,
       parameters: {
         action: {
           type: 'string',
           required: true,
-          enum: ['goal', 'decision', 'next', 'artifact', 'unresolved', 'focus', 'status', 'done', 'show', 'export', 'clear'],
+          enum: ['goal', 'decision', 'next', 'artifact', 'unresolved', 'focus', 'handoff', 'deadend', 'status', 'done', 'show', 'export', 'clear'],
           description: '要执行的操作：goal=设/改目标；decision=记录决策；next=加下一步；'
             + 'artifact=记录产物；unresolved=记录未决问题；focus=设当前焦点；'
-            + 'status=更新状态；done=标记第 n 个 next 完成；show=查看当前状态；export=导出 md 快照；clear=清空',
+            + 'handoff=写交接摘要（跨会话/跨 agent）；deadend=记录走过的死路与原因；'
+            + 'status=更新状态（只能到 in_review，done 需人类确认）；done=标记第 n 个 next 完成；'
+            + 'show=查看当前状态；export=导出 md 快照；clear=清空',
         },
         text: {
           type: 'string',
@@ -250,8 +257,14 @@ function registerWorkTool(ctx, store) {
         },
         status: {
           type: 'string',
-          enum: ['planned', 'active', 'blocked', 'paused', 'done'],
-          description: 'action=status 时的目标状态',
+          enum: ['planned', 'active', 'blocked', 'paused', 'in_review'],
+          description: 'action=status 时的目标状态。模型只能推到 in_review（已交付、待人类验收）；'
+            + 'done 不可由模型设置——需人类执行 /checkpoint status done',
+        },
+        version: {
+          type: 'integer',
+          description: '可选。乐观并发：带上你读到的 WorkState version；若库中版本已变则拒绝写入'
+            + '（返回 WC_STALE_VERSION，要求重读再写），避免并发静默覆盖',
         },
         index: {
           type: 'integer',
@@ -278,6 +291,16 @@ function registerWorkTool(ctx, store) {
         try {
           exec?.signal?.throwIfAborted?.()
           const action = typeof args.action === 'string' ? args.action : ''
+          // 完成权分离（2026-09-09）：模型不得自报 done——只允许推到 in_review，done 由人类确认。
+          // 枚举已排除 done，这里再挡一次（模型可能绕过 schema 描述）。
+          if (action === 'status' && String(args.status ?? '').trim() === 'done') {
+            return {
+              ok: false,
+              text: 'WC_COMPLETION_REQUIRES_HUMAN: 模型不能把目标置为 done。'
+                + '请用 status=in_review 表示「已交付、待验收」，并确认 deliverable 已记录；'
+                + 'done 只能由人类执行 /checkpoint status done 确认。',
+            }
+          }
           const sessionCwd = exec?.agent?.session?.cwd
             ?? (typeof ctx.get === 'function' ? ctx.get('session')?.cwd : undefined)
           // export：无副作用，直接渲染 md 快照（可落盘/进 git）
@@ -303,7 +326,8 @@ function registerWorkTool(ctx, store) {
             get: (name) => (name === 'session' ? { cwd: sessionCwd } : undefined),
             logger: ctx.logger,
           }
-          const result = await handleCheckpoint(store, { rawInput: raw }, toolCtx)
+          const expectedVersion = Number.isInteger(args.version) ? args.version : undefined
+          const result = await handleCheckpoint(store, { rawInput: raw, expectedVersion }, toolCtx)
           // next + deadline/deliverable：补写 next_meta（与 next_steps 下标对齐，最后一项）
           if (action === 'next' && result?.kind === 'success'
               && (args.deadline !== undefined || args.deliverable !== undefined)) {
@@ -327,6 +351,14 @@ function registerWorkTool(ctx, store) {
           }
           return { ok: result?.kind === 'success', text: String(result?.text ?? '') }
         } catch (err) {
+          if (err instanceof WorkStateVersionConflictError) {
+            // 版本冲突不是故障：告诉模型"重读再写"，且不要重试同一个 version
+            return {
+              ok: false,
+              text: 'WC_STALE_VERSION: 版本冲突（库中 version=' + err.currentVersion + '，你带的是旧值）。'
+                + '先 work_state show 重读，再用新的 version 重写；不要重试同一个 version。',
+            }
+          }
           ctx.logger?.warn?.('[work-continuity] wc:degraded work_tool_failed reason='
             + (err instanceof Error ? err.message : String(err)))
           return { ok: false, text: 'work_state error: ' + (err instanceof Error ? err.message : String(err)) }
@@ -346,6 +378,7 @@ const INJECT_DECISION_MAX = 2
 const INJECT_DECISION_CHARS = 100
 const INJECT_UNRESOLVED_MAX = 2
 const INJECT_UNRESOLVED_CHARS = 80
+const INJECT_HANDOFF_CHARS = 100
 
 /** 紧凑 WorkState 摘要（pre-step 注入用；空/全空返回 ''） */
 export function renderWorkStateBrief(state) {
@@ -356,12 +389,14 @@ export function renderWorkStateBrief(state) {
   const next = Array.isArray(state.nextSteps) ? state.nextSteps : []
   const decisions = Array.isArray(state.decisions) ? state.decisions : []
   const unresolved = Array.isArray(state.unresolved) ? state.unresolved : []
-  if (!goal && !focus && next.length === 0 && decisions.length === 0 && unresolved.length === 0) return ''
+  // 2026-09-09：handoff 单独存在时也要注入——交接摘要是跨会话续接的核心信息
+  const ho = (state.handoff && typeof state.handoff === 'object') ? state.handoff : null
+  if (!goal && !focus && next.length === 0 && decisions.length === 0 && unresolved.length === 0 && !ho?.summary) return ''
   const head = []
   if (goal) head.push('goal: ' + truncateStr(goal, INJECT_GOAL_MAX))
   if (state.status && state.status !== 'planned') head.push('status: ' + state.status)
   if (focus) head.push('focus: ' + truncateStr(focus, INJECT_FOCUS_MAX))
-  lines.push('[work-state] ' + head.join(' | '))
+  lines.push(head.length > 0 ? '[work-state] ' + head.join(' | ') : '[work-state]')
   if (next.length > 0) {
     // T4 M4.5（2026-09-07）：next_meta 下标对齐渲染——deadline 附 (dl YYYY-MM-DD)，
     // 已过期附 ⚠ 标记（ISO 日期字典序比较；meta 缺失/越界/非对象 → 原样，不炸注入）
@@ -384,6 +419,7 @@ export function renderWorkStateBrief(state) {
     lines.push('open: ' + unresolved.slice(0, INJECT_UNRESOLVED_MAX)
       .map((u) => truncateStr(String(u), INJECT_UNRESOLVED_CHARS)).join(' / '))
   }
+  if (ho?.summary) lines.push('handoff: ' + truncateStr(String(ho.summary), INJECT_HANDOFF_CHARS))
   lines.push('(work 状态可经 work_state 工具或 /checkpoint 更新)')
   return lines.join('\n')
 }
@@ -553,32 +589,52 @@ async function handleCheckpoint(store, invocation, ctx) {
       if (!arg) return { kind: 'error', text: 'goal needs text: /checkpoint goal <goal>' }
       state.goal = arg
       state.status = state.status === 'done' ? 'active' : state.status
-      saveWithTrace(store, state, ctx, verb)
+      saveWithTrace(store, state, ctx, verb, invocation?.expectedVersion)
       return { kind: 'success', text: `goal set: ${arg}` }
 
     case 'decision':
       if (!arg) return { kind: 'error', text: 'decision needs text: /checkpoint decision <text>' }
       state.decisions.push({ text: arg, evidenceIds: [] })
-      saveWithTrace(store, state, ctx, verb)
+      saveWithTrace(store, state, ctx, verb, invocation?.expectedVersion)
       return { kind: 'success', text: `decision #${state.decisions.length} recorded` }
 
     case 'next':
       if (!arg) return { kind: 'error', text: 'next needs text: /checkpoint next <text>' }
       state.nextSteps.push(arg)
-      saveWithTrace(store, state, ctx, verb)
+      saveWithTrace(store, state, ctx, verb, invocation?.expectedVersion)
       return { kind: 'success', text: `next step #${state.nextSteps.length} added` }
 
     case 'artifact':
       if (!arg) return { kind: 'error', text: 'artifact needs path: /checkpoint artifact <path>' }
       state.artifacts.push(arg)
-      saveWithTrace(store, state, ctx, verb)
+      saveWithTrace(store, state, ctx, verb, invocation?.expectedVersion)
       return { kind: 'success', text: `artifact added: ${arg}` }
 
     case 'unresolved':
       if (!arg) return { kind: 'error', text: 'unresolved needs text: /checkpoint unresolved <text>' }
       state.unresolved.push(arg)
-      saveWithTrace(store, state, ctx, verb)
+      saveWithTrace(store, state, ctx, verb, invocation?.expectedVersion)
       return { kind: 'success', text: `unresolved item added` }
+
+    case 'handoff': {
+      // 2026-09-09：handoff 列此前"数据层留位、能力层为空"（最易误导下一个 agent 的死字段）。
+      if (!arg) return { kind: 'error', text: 'handoff needs text: /checkpoint handoff <summary>' }
+      const prev = (state.handoff && typeof state.handoff === 'object') ? state.handoff : {}
+      state.handoff = { ...prev, summary: arg, updatedAt: new Date().toISOString() }
+      saveWithTrace(store, state, ctx, verb, invocation?.expectedVersion)
+      return { kind: 'success', text: 'handoff recorded: ' + arg }
+    }
+
+    case 'deadend': {
+      // 死路与原因：四段式交接里最有价值的一段——避免下一个会话重走已证伪的路径。
+      if (!arg) return { kind: 'error', text: 'deadend needs text: /checkpoint deadend <尝试> — <为何失败>' }
+      const prev = (state.handoff && typeof state.handoff === 'object') ? state.handoff : {}
+      const deadends = Array.isArray(prev.deadends) ? [...prev.deadends] : []
+      deadends.push({ text: arg, at: new Date().toISOString() })
+      state.handoff = { ...prev, deadends, updatedAt: new Date().toISOString() }
+      saveWithTrace(store, state, ctx, verb, invocation?.expectedVersion)
+      return { kind: 'success', text: 'deadend #' + deadends.length + ' recorded' }
+    }
 
     case 'status':
       if (!WORK_STATUSES.includes(arg)) {
@@ -586,13 +642,13 @@ async function handleCheckpoint(store, invocation, ctx) {
       }
       state.status = arg
       state.checkpoints.push({ timestamp: new Date().toISOString(), state: arg, evidenceIds: [] })
-      saveWithTrace(store, state, ctx, verb)
+      saveWithTrace(store, state, ctx, verb, invocation?.expectedVersion)
       return { kind: 'success', text: `status -> ${arg}` }
 
     case 'focus':
       if (!arg) return { kind: 'error', text: 'focus needs text: /checkpoint focus <text>' }
       state.focus = arg
-      saveWithTrace(store, state, ctx, verb)
+      saveWithTrace(store, state, ctx, verb, invocation?.expectedVersion)
       return { kind: 'success', text: `focus set: ${arg}` }
 
     case 'done': {
@@ -605,7 +661,7 @@ async function handleCheckpoint(store, invocation, ctx) {
       if (Array.isArray(state.nextMeta)) state.nextMeta.splice(idx - 1, 1)
       // P1-1（2026-09-07 审计）：done 同步 nextMeta——防后续 next+deadline/deliverable 按下标 length-1 补写串到旧条目
       state.completedSteps.push({ text: finished, at: new Date().toISOString() })
-      saveWithTrace(store, state, ctx, 'done')
+      saveWithTrace(store, state, ctx, 'done', invocation?.expectedVersion)
       return { kind: 'success', text: 'done: ' + finished + '（剩余 ' + state.nextSteps.length + ' 项）' }
     }
 
@@ -617,7 +673,9 @@ async function handleCheckpoint(store, invocation, ctx) {
 
     case 'clear': {
       // P1-2（2026-09-07 审计）：save 缺省字段回填 existing——必须显式清 focus/nextMeta/completedSteps
-      store.save({ scopeId, goal: '', status: 'planned', focus: null, decisions: [], checkpoints: [], unresolved: [], nextSteps: [], nextMeta: [], artifacts: [], completedSteps: [], handoff: null })
+      const clearPayload = { scopeId, goal: '', status: 'planned', focus: null, decisions: [], checkpoints: [], unresolved: [], nextSteps: [], nextMeta: [], artifacts: [], completedSteps: [], handoff: null }
+      if (invocation?.expectedVersion !== undefined) clearPayload.expectedVersion = invocation.expectedVersion
+      store.save(clearPayload)
       return { kind: 'success', text: 'work state cleared' }
     }
 
@@ -630,13 +688,18 @@ async function handleCheckpoint(store, invocation, ctx) {
  * P1-2：保存 + 失败留痕。
  * 旧实现写失败只把错误文本返回给用户，无日志无审计——线上就是"悄悄没存上"。
  */
-function saveWithTrace(store, state, ctx, op) {
+function saveWithTrace(store, state, ctx, op, expectedVersion) {
   try {
-    return store.save(state)
+    return store.save(expectedVersion === undefined ? state : { ...state, expectedVersion })
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
+    if (err instanceof WorkStateVersionConflictError) {
+      // 版本冲突是"检测到的并发问题"，不是故障——单独记 op，便于 /checkpoint stats 观察
+      try { store.appendAudit?.({ op: 'stale-version', scopeId: state.scopeId, detail: op + ': expected=' + expectedVersion + ' current=' + err.currentVersion }) } catch { /* ignore */ }
+    } else {
+      try { store.appendAudit?.({ op: 'error', scopeId: state.scopeId, detail: op + ': ' + msg }) } catch { /* ignore */ }
+    }
     ctx?.logger?.warn?.('[work-continuity] wc:degraded save_failed op=' + op + ' scope=' + state.scopeId + ' reason=' + msg)
-    try { store.appendAudit?.({ op: 'error', scopeId: state.scopeId, detail: op + ': ' + msg }) } catch { /* ignore */ }
     throw err
   }
 }
@@ -692,6 +755,12 @@ function renderWorkState(state) {
     lines.push('artifacts:')
     state.artifacts.forEach((a, i) => lines.push(`  ${i + 1}. ${a}`))
   }
+  const ho = (state.handoff && typeof state.handoff === 'object') ? state.handoff : null
+  if (ho?.summary) lines.push('handoff: ' + ho.summary)
+  if (Array.isArray(ho?.deadends) && ho.deadends.length) {
+    lines.push('deadends（走过的死路与原因）:')
+    ho.deadends.forEach((d, i) => lines.push(`  ${i + 1}. ${d?.text ?? ''}`))
+  }
   return lines.filter(Boolean).join('\n')
 }
 
@@ -733,6 +802,12 @@ export function renderWorkStateExport(state) {
   if (state.completedSteps?.length) {
     lines.push('', '## completed')
     state.completedSteps.forEach((c) => lines.push('- ' + (c?.text ?? '') + '（' + String(c?.at ?? '').slice(0, 10) + '）'))
+  }
+  const ho = (state.handoff && typeof state.handoff === 'object') ? state.handoff : null
+  if (ho?.summary) lines.push('', '## handoff', ho.summary)
+  if (Array.isArray(ho?.deadends) && ho.deadends.length) {
+    lines.push('', '## deadends')
+    ho.deadends.forEach((d) => lines.push('- ' + (d?.text ?? '')))
   }
   lines.push('', '_via dsh-work-continuity /checkpoint export_')
   return lines.join('\n')

@@ -51,7 +51,9 @@ Work Continuity 把工作状态变成**不用你记得记**的事：目标、决
 | `/checkpoint next <内容>` | 添加下一步行动 | `/checkpoint next 合流组A` |
 | `/checkpoint artifact <路径>` | 记录产物路径 | `/checkpoint artifact D:/out/report.pdf` |
 | `/checkpoint unresolved <内容>` | 记录没解决的问题 | `/checkpoint unresolved 审批面板没显示` |
-| `/checkpoint status <状态>` | 更新进度状态 | `/checkpoint status active`（planned/active/blocked/paused/done） |
+| `/checkpoint status <状态>` | 更新进度状态 | `/checkpoint status active`（planned/active/blocked/paused/**in_review**/done） |
+| `/checkpoint handoff <内容>` | 写交接摘要（跨会话/跨 agent） | `/checkpoint handoff 下个会话先跑全量测试` |
+| `/checkpoint deadend <尝试> — <为何失败>` | 记录走过的死路与原因 | `/checkpoint deadend 直接改 save 签名 — 调用点太多` |
 | `/checkpoint focus <内容>` | 设置当前焦点 | `/checkpoint focus 修回归` |
 | `/checkpoint show` | 查看当前工作状态 | `/checkpoint show` |
 | `/checkpoint done <n>` | 标记第 n 个下一步已完成（与 next_meta 下标对齐，清其 deadline/deliverable） | `/checkpoint done 1` |
@@ -60,7 +62,7 @@ Work Continuity 把工作状态变成**不用你记得记**的事：目标、决
 
 ### work_state 模型工具（LLM 侧，同数据）
 
-模型可见工具 `work_state` 与 `/checkpoint` 共享同一 store/渲染/审计：action 支持 goal/decision/next/artifact/unresolved/focus/status/done/show/export/clear。`next` 可带 `deadline`（ISO 日期或 YYYY-MM-DD）与 `deliverable`（交付物/验收判据——完成判据=实测结果而非口头自报），写入 next_meta 与 next_steps 下标对齐（P1-1）。注入摘要已渲染到期标注（T4 M4.5）：next 匹配 nextMeta[i].deadline → 「(dl YYYY-MM-DD)」，已过期 → 「⚠ 逾期」——模型每轮可见截止时间。工具描述明确告诉模型：用户提出新构想/目标、工作到值得追踪的节点、需要跨会话记住进度时调用；琐碎单步不要记。
+模型可见工具 `work_state` 与 `/checkpoint` 共享同一 store/渲染/审计：action 支持 goal/decision/next/artifact/unresolved/focus/handoff/deadend/status/done/show/export/clear。**完成权分离（2026-09-09）**：模型只能把目标推到 `in_review`（已交付、待验收），`done` 不可由模型设置——需人类执行 `/checkpoint status done`。工具另接受可选 `version` 参数做乐观并发：带上你读到的 version，库中版本已变则返回 `WC_STALE_VERSION` 并要求重读再写，避免并发静默覆盖。`next` 可带 `deadline`（ISO 日期或 YYYY-MM-DD）与 `deliverable`（交付物/验收判据——完成判据=实测结果而非口头自报），写入 next_meta 与 next_steps 下标对齐（P1-1）。注入摘要已渲染到期标注（T4 M4.5）：next 匹配 nextMeta[i].deadline → 「(dl YYYY-MM-DD)」，已过期 → 「⚠ 逾期」——模型每轮可见截止时间。工具描述明确告诉模型：用户提出新构想/目标、工作到值得追踪的节点、需要跨会话记住进度时调用；琐碎单步不要记。
 
 ## 设计取舍
 
@@ -68,7 +70,7 @@ Work Continuity 把工作状态变成**不用你记得记**的事：目标、决
 
 演进路径：MVP 只做显式命令（`/checkpoint`）→ 发现没人记得敲 → 加事件自动捕获（goal/change、todo/write，**确定性触发、无 LLM 猜测**）→ 再补 LLM 自主决断（`work_state` 工具 + 摘要注入，覆盖自然语言构想）。
 
-噪声控制：已有 WorkState 不被 todo 全量替换覆盖；done 状态不注入；内容无变化不写库（diff 门控）；全部 fail-open——插件任何异常只记日志，绝不阻断对话。
+噪声控制：已有 WorkState 不被 todo 全量替换覆盖；done 状态不注入；内容无变化不写库（diff 门控）；全部 fail-open——插件任何异常只记日志，绝不阻断对话。注入摘要含 handoff 一行（有则显示，100 字符上限）。
 
 ## Agent 安装指南（面向自动化装配）
 

@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS work_state (
   scope_id      TEXT NOT NULL,
   project_id    TEXT NOT NULL DEFAULT '',
   goal          TEXT NOT NULL DEFAULT '',
-  status        TEXT NOT NULL DEFAULT 'planned',  -- planned/active/blocked/paused/done
+  status        TEXT NOT NULL DEFAULT 'planned',  -- planned/active/blocked/paused/in_review/done
   focus         TEXT,
   decisions     TEXT NOT NULL DEFAULT '[]',  -- JSON [{text, reason?, evidenceIds[]}]
   checkpoints   TEXT NOT NULL DEFAULT '[]',  -- JSON [{timestamp, state, evidenceIds[]}]
@@ -39,15 +39,33 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_work_scope_project ON work_state (scope_id
 CREATE TABLE IF NOT EXISTS work_audit (
   id        INTEGER PRIMARY KEY AUTOINCREMENT,
   ts        INTEGER NOT NULL,
-  op        TEXT NOT NULL,        -- save | skip-nochange | auto-goal | inject | error | done
+  op        TEXT NOT NULL,        -- save | skip-nochange | stale-version | auto-goal | inject | error | done
   scope_id  TEXT NOT NULL DEFAULT '',
   detail    TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_work_audit_ts ON work_audit (ts);
 `
 
-/** 状态枚举（契约 CONTRACTS.md §5，见 my-plugins/acp-docs/） */
-export const WORK_STATUSES = Object.freeze(['planned', 'active', 'blocked', 'paused', 'done'])
+/**
+ * 状态枚举（契约 CONTRACTS.md §5，见 my-plugins/acp-docs/）。
+ *
+ * 2026-09-09 加 `in_review`：完成权分离——模型只能把目标推到 `in_review` 并附交付物，
+ * `done` 由人类通过 /checkpoint status done 确认（对标 DSH-taskboard「模型工具集故意没有 accept」）。
+ */
+export const WORK_STATUSES = Object.freeze(['planned', 'active', 'blocked', 'paused', 'in_review', 'done'])
+
+/**
+ * 版本冲突：写入方持有的 expectedVersion 与库中当前版本不一致。
+ * 语义 = 让并发写成为可检测问题，而不是后写者静默覆盖前写者。
+ */
+export class WorkStateVersionConflictError extends Error {
+  constructor(currentVersion) {
+    super('stale version: expectedVersion mismatch (current=' + currentVersion + ')')
+    this.name = 'WorkStateVersionConflictError'
+    this.code = 'WC_STALE_VERSION'
+    this.currentVersion = currentVersion
+  }
+}
 
 /**
  * @param {object} opts
@@ -99,6 +117,15 @@ export function openWorkStore(opts = {}) {
     }
     const id = keyOf(input.scopeId, input.projectId ?? '')
     const existing = db.prepare('SELECT * FROM work_state WHERE id = ?').get(id)
+    // 乐观并发（2026-09-09）：写入方可选携带 expectedVersion；不一致即拒绝，绝不静默覆盖。
+    // 检查放在 no-change 短路之前——"内容相同"不等于"没人改过"。
+    if (input.expectedVersion !== undefined && input.expectedVersion !== null) {
+      const currentVersion = existing ? existing.version : 0
+      if (input.expectedVersion !== currentVersion) {
+        appendAudit({ op: 'stale-version', scopeId: input.scopeId, detail: 'expected=' + input.expectedVersion + ' current=' + currentVersion })
+        throw new WorkStateVersionConflictError(currentVersion)
+      }
+    }
     const now = Date.now()
     const version = existing ? existing.version + 1 : 1
 

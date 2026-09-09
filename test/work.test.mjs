@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import path from 'node:path'
 import { openWorkStore } from '../src/store.mjs'
-import { apply as wcApply, scopeIdForCwd } from '../src/index.mjs'
+import { apply as wcApply, scopeIdForCwd, renderWorkStateBrief } from '../src/index.mjs'
 
 function fresh(t) {
   const dir = mkdtempSync(path.join(tmpdir(), 'acp-work-'))
@@ -337,3 +337,92 @@ test('openWorkStore：dir 缺省/空值不落 cwd（回退 DSH_HOME 或 ~/.dsh�
   const fallbackDir = path.join(home, 'dsh-work-continuity')
   try { if (existsSync(fallbackDir)) rmSync(fallbackDir, { recursive: true, force: true }) } catch {}
 })
+
+// ---- 2026-09-09 同行调研改善批次：完成权分离 / 乐观并发 / handoff ----
+
+function bootTool(t) {
+  const dir = mkdtempSync(path.join(tmpdir(), 'acp-wc-imp-'))
+  const ctx = mockAutoCtx()
+  let toolDef = null
+  const commands = []
+  ctx.get = (name) => (name === 'tools' ? { register: (def) => { toolDef = def } }
+    : name === 'commands' ? { register: (def) => commands.push(def) }
+      : name === 'session' ? { cwd: 'D:\\ws\\proj-a' }
+        : name === 'work' ? ctx.__services.work : undefined)
+  wcApply(ctx, { workDir: dir })
+  t.after(() => { try { for (const c of ctx.__cleanups) c() } catch {} rmSync(dir, { recursive: true, force: true }) })
+  return {
+    ctx,
+    commands,
+    async tool() { await new Promise((r) => setTimeout(r, 10)); assert.ok(toolDef, 'work_state 工具应已注册'); return toolDef },
+  }
+}
+
+const TOOL_EXEC = { agent: { session: { cwd: 'D:\\ws\\proj-a' } }, signal: { throwIfAborted() {} } }
+
+test('完成权分离：模型工具不接受 status=done（schema 拦截）', async (t) => {
+  const h = bootTool(t)
+  const toolDef = await h.tool()
+  await assert.rejects(() => toolDef.execute({ action: 'status', status: 'done' }, TOOL_EXEC), /must be one of/)
+})
+
+test('完成权分离：模型可推 in_review，人类 /checkpoint status done 才能确认', async (t) => {
+  const h = bootTool(t)
+  const toolDef = await h.tool()
+  const r1 = await toolDef.execute({ action: 'status', status: 'in_review' }, TOOL_EXEC)
+  assert.equal(r1.ok, true)
+  const sid = scopeIdForCwd('D:\\ws\\proj-a')
+  assert.equal(h.ctx.__services.work.get(sid).status, 'in_review')
+  // 人类路径：命令仍可置 done
+  assert.equal(h.commands.length, 1, '/checkpoint 命令应注册')
+  const r2 = await h.commands[0].handler({ rawInput: 'status done' })
+  assert.equal(r2.kind, 'success')
+  assert.equal(h.ctx.__services.work.get(sid).status, 'done')
+})
+
+test('乐观并发：expectedVersion 不匹配 → WC_STALE_VERSION，匹配则写入', (t) => {
+  const store = fresh(t)
+  const v1 = store.save({ scopeId: 's', goal: 'v1' })
+  assert.equal(v1.version, 1)
+  assert.throws(
+    () => store.save({ scopeId: 's', goal: 'x', expectedVersion: 99 }),
+    (e) => e.code === 'WC_STALE_VERSION' && e.currentVersion === 1,
+  )
+  const v2 = store.save({ scopeId: 's', goal: 'v2', expectedVersion: 1 })
+  assert.equal(v2.version, 2)
+  assert.equal(v2.goal, 'v2')
+})
+
+test('乐观并发：工具带旧 version → 返回 WC_STALE_VERSION 提示重读', async (t) => {
+  const h = bootTool(t)
+  const toolDef = await h.tool()
+  await toolDef.execute({ action: 'goal', text: 'g1' }, TOOL_EXEC)
+  const bad = await toolDef.execute({ action: 'goal', text: 'g2', version: 99 }, TOOL_EXEC)
+  assert.equal(bad.ok, false)
+  assert.ok(bad.text.includes('WC_STALE_VERSION'), '应提示版本冲突: ' + bad.text)
+  const good = await toolDef.execute({ action: 'goal', text: 'g2', version: 1 }, TOOL_EXEC)
+  assert.equal(good.ok, true)
+  const sid = scopeIdForCwd('D:\\ws\\proj-a')
+  assert.equal(h.ctx.__services.work.get(sid).goal, 'g2')
+})
+
+test('handoff / deadend：写入并在 show、export、注入摘要中渲染', async (t) => {
+  const h = bootTool(t)
+  const toolDef = await h.tool()
+  const r1 = await toolDef.execute({ action: 'handoff', text: '下一个会话先跑全量测试再改 store' }, TOOL_EXEC)
+  assert.equal(r1.ok, true)
+  const r2 = await toolDef.execute({ action: 'deadend', text: '直接改 save 签名 — 调用点太多' }, TOOL_EXEC)
+  assert.equal(r2.ok, true)
+  const sid = scopeIdForCwd('D:\\ws\\proj-a')
+  const st = h.ctx.__services.work.get(sid)
+  assert.equal(st.handoff.summary, '下一个会话先跑全量测试再改 store')
+  assert.equal(st.handoff.deadends.length, 1)
+  const show = await toolDef.execute({ action: 'show' }, TOOL_EXEC)
+  assert.ok(show.text.includes('handoff: 下一个会话先跑全量测试再改 store'), show.text)
+  assert.ok(show.text.includes('死路'), show.text)
+  const exp = await toolDef.execute({ action: 'export' }, TOOL_EXEC)
+  assert.ok(exp.text.includes('## handoff'), exp.text)
+  assert.ok(exp.text.includes('## deadends'), exp.text)
+  assert.ok(renderWorkStateBrief(st).includes('handoff: 下一个会话先跑全量测试再改 store'))
+})
+
