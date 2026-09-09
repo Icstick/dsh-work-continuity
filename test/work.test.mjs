@@ -338,6 +338,35 @@ test('openWorkStore：dir 缺省/空值不落 cwd（回退 DSH_HOME 或 ~/.dsh�
   try { if (existsSync(fallbackDir)) rmSync(fallbackDir, { recursive: true, force: true }) } catch {}
 })
 
+test('压缩后重锚：compaction/summary 后下一步无条件补注一次，随后不再重复', async (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'acp-wc-reanchor-'))
+  const ctx = mockAutoCtx()
+  wcApply(ctx, { workDir: dir })
+  ctx.__services.work.save({ scopeId: scopeIdForCwd('D:\\ws\\proj-a'), goal: '压缩后别丢状态', status: 'active' })
+  const pre = ctx.__listeners['agent/pre-step'] ?? []
+  const sess = { cwd: 'D:\\ws\\proj-a', id: 'sess-reanchor' }
+  const mkDecision = async () => ({ kind: 'enter', messages: [] })
+  // step 1：正常注入
+  let r = await pre[0]({ agent: { session: sess }, step: 1 }, mkDecision)
+  assert.equal(r.messages.length, 1, 'step1 注入')
+  // step 3：无压缩 → 不注入
+  r = await pre[0]({ agent: { session: sess }, step: 3 }, mkDecision)
+  assert.equal(r.messages.length, 0, '非 step1 且无压缩 → 不注入')
+  // 发生压缩
+  const sessListeners = ctx.__listeners['session/event'] ?? []
+  assert.ok(sessListeners.length >= 1, 'session/event 监听已注册')
+  for (const cb of sessListeners) cb({ id: 'sess-reanchor' }, { type: 'compaction/summary', data: {} })
+  // step 4：重锚补注
+  r = await pre[0]({ agent: { session: sess }, step: 4 }, mkDecision)
+  assert.equal(r.messages.length, 1, '压缩后应补注一次')
+  assert.ok(r.messages[0].content[0].text.includes('压缩后别丢状态'))
+  // step 5：不再重复
+  r = await pre[0]({ agent: { session: sess }, step: 5 }, mkDecision)
+  assert.equal(r.messages.length, 0, '重锚只补一次')
+  t.after(() => { try { for (const c of ctx.__cleanups) c() } catch {} rmSync(dir, { recursive: true, force: true }) })
+})
+
+
 // ---- 2026-09-09 同行调研改善批次：完成权分离 / 乐观并发 / handoff ----
 
 function bootTool(t) {

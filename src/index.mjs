@@ -487,11 +487,25 @@ export function reportWorkStateUsage(ctx, sessionId, body) {
  * fail-open：任何异常返回原决策/空决策，不阻断 turn（与 ACP composer 同范式）。
  */
 function registerWorkStateInjection(ctx, store) {
+  // 压缩后重锚（2026-09-09）：compaction 会把已经注入过的工作摘要从上下文里抹掉，
+  // 而注入只在 step 1 发生——同轮后续步骤就再也看不到工作状态了（"Compaction Cliff"）。
+  // 做法：监听 compaction/summary，把会话标记为待重锚；下一次 pre-step 无条件补注一次再清标记。
+  const needsReanchor = new Set()
+  ctx.on('session/event', (session, event) => {
+    try {
+      if (!event || event.type !== 'compaction/summary') return
+      const sid = session?.id
+      if (sid) needsReanchor.add(sid)
+    } catch { /* fail-open：标记失败只是少一次重锚 */ }
+  })
+
   ctx.on('agent/pre-step', async (payload, next) => {
     let decision
     try {
       decision = await next()
-      if (payload?.step !== 1) return decision
+      const sessionId = payload?.agent?.session?.id ?? ''
+      const reanchor = Boolean(sessionId) && needsReanchor.has(sessionId)
+      if (payload?.step !== 1 && !reanchor) return decision
       if (!decision || decision.kind !== 'enter') return decision
       const cwd = payload?.agent?.session?.cwd
         ?? (typeof ctx.get === 'function' ? ctx.get('session')?.cwd : undefined)
@@ -500,8 +514,9 @@ function registerWorkStateInjection(ctx, store) {
       if (!state || state.status === 'done') return decision // 无 state / 已完成 → 不注入
       const body = renderWorkStateBrief(state)
       if (!body) return decision
+      // 重锚补注成功（或有 state 但无摘要）→ 清标记，避免每步重复注入
+      if (reanchor && sessionId) needsReanchor.delete(sessionId)
       // S1-P7：实际注入发生 → 向调度器上报注入字符（fail-open）
-      const sessionId = payload?.agent?.session?.id ?? ''
       reportWorkStateUsage(ctx, sessionId, body)
       return { kind: 'enter', messages: [...decision.messages, workStatePluginMessage(body)] }
     } catch (err) {
