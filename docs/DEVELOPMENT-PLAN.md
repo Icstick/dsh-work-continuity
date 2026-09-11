@@ -11,7 +11,7 @@
 | 0.2.0 | a295924 | 权威事件自动捕获 P1-5、work_state 工具与 pre-step 注入 P1-6、注入调度器接线、设置顶层 section、deadline/deliverable meta、golden regression |
 | 0.2.1 | 01f0a42 | T4 M4.5：注入摘要 deadline 渲染 + 逾期标记 |
 | 0.3.0 | ca179a5 | 0.2.1 未单独发版，随 0.3.0 发行：T4 M4.5 deadline 渲染（c54c22c）+ 2026-09-07 审查修复（P1-1/P1-2、B1-B6/B8）与 backlog 收口；版本决议不变：修复集不单独 bump，随特性里程碑收口 |
-| 0.4.0 | （补记） | 完成权分离（模型→in_review，人类 /checkpoint status done）+ 乐观并发（WC_STALE_VERSION）+ handoff/deadend 能力与渲染 + 压缩后重锚（compaction/summary 后补注一次）+ form 事故修复 |
+| 0.4.0 | 0e76ddd | 完成权分离（模型→in_review，人类 /checkpoint status done）+ 乐观并发（WC_STALE_VERSION）+ handoff/deadend 能力与渲染 + 压缩后重锚（compaction/summary 后补注一次）+ form 事故修复 |
 
 ## 待办（Backlog）
 
