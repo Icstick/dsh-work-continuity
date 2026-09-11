@@ -11,6 +11,7 @@
 | 0.2.0 | a295924 | 权威事件自动捕获 P1-5、work_state 工具与 pre-step 注入 P1-6、注入调度器接线、设置顶层 section、deadline/deliverable meta、golden regression |
 | 0.2.1 | 01f0a42 | T4 M4.5：注入摘要 deadline 渲染 + 逾期标记 |
 | 0.3.0 | ca179a5 | 0.2.1 未单独发版，随 0.3.0 发行：T4 M4.5 deadline 渲染（c54c22c）+ 2026-09-07 审查修复（P1-1/P1-2、B1-B6/B8）与 backlog 收口；版本决议不变：修复集不单独 bump，随特性里程碑收口 |
+| 0.4.0 | （补记） | 完成权分离（模型→in_review，人类 /checkpoint status done）+ 乐观并发（WC_STALE_VERSION）+ handoff/deadend 能力与渲染 + 压缩后重锚（compaction/summary 后补注一次）+ form 事故修复 |
 
 ## 待办（Backlog）
 
@@ -26,6 +27,8 @@
 | WC-B8 | P3 | S2 迁移影响：运行时零依赖 memento/ACP；2 条历史注释（index.mjs:7、withService 处）措辞中性化 | 随 WC-B3 注释批次一并处理 | ✅ 2026-09-08 6a7fc55 |
 
 ## 已收口（近期）
+
+- **form 事故（2026-09-10）**：注入消息声明自造值 `form:'work-state'` → session-format v2→v3 迁移拒收整条会话（本机 25 条历史会话受影响）✅ f6f5715（删自造值 + 回归断言 `source.form === undefined`；maid `form:'pin'`、ACP `form:'consolidation'` 同类问题同日修复，ACP `form:'recall'` 属官方词表合法值）
 
 - P1-1（done <n> 不同步 next_meta）✅ 0d5057b —— golden W9
 - P1-2（/checkpoint clear 不全量重置）✅ 0d5057b —— golden W10
