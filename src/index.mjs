@@ -435,7 +435,11 @@ function workStatePluginMessage(text) {
     id: randomUUID(),
     role: 'user',
     content: [{ type: 'text', text }],
-    source: { kind: 'plugin', plugin: 'dsh-work-continuity', form: 'work-state' },
+    // 2026-09-10：删掉自造值 form:'work-state'。form 是官方语义词表
+    // （instructions/catalog/snapshot/notice/relay/recall），不在表内的值会让
+    // session-format 的 v2→v3 迁移拒收整条会话（本机 25 条历史会话因此打不开）。
+    // 不声明 form 属官方默认（opaque 上下文行），渲染与未知 form 完全一致。
+    source: { kind: 'plugin', plugin: 'dsh-work-continuity' },
   }
 }
 
