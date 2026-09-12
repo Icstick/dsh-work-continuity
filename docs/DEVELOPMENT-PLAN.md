@@ -23,7 +23,7 @@
 | WC-B4 | P3 | README 设计取舍节"work_audit 审计回溯"表述偏高：实际无明细查询命令（仅 /checkpoint stats 聚合 + 落库留痕） | README 改"全部写入 work_audit 留痕（/checkpoint stats 聚合可见）"；若需明细查询面另排 | ✅ 2026-09-08 6a7fc55 |
 | WC-B5 | P3 | lint warnings 14 个（0 error）：src/index.mjs:522 未用参数、client/index.js:133/137 unicorn spread fallback、test 9 个未用 t 参数（实查） | 一次 lint-clean 提交（`pnpm lint` 归零；42/42 测试绿） | ✅ 2026-09-08 6a7fc55 |
 | WC-B6 | P3 | git 残留分支 ×2（已并入 master）：docs/pr-template、feat/scheduler-metering | git-guardrails 流程：本地 branch -d + push origin --delete（均已合并，无强删） | ✅ 2026-09-08（本地+远端已删） |
-| WC-B7 | 计划 | work_audit 明细查询面（可选）：按 scope/op 查审计明细 | 若需要再做（当前 stats 足够）；不排期 | 未排期 |
+| WC-B7 | 计划 | work_audit 明细查询面（可选）：按 scope/op 查审计明细 | 命令面 `/checkpoint audit [--scope <id>] [--op <op>] [--limit n]`（读 work_audit 的 ts/op/scope_id/detail；分页 + 空态提示）；模型侧可选 `work_state` action=audit（只读） | **已排期**：WC 0.5.0 候选——随 S2 观察期结束（2026-09-22）+ 下个特性批评估；期间若出现真实审计需求（注入异常/写入排查）则提前（2026-09-12 排期） |
 | WC-B8 | P3 | S2 迁移影响：运行时零依赖 memento/ACP；2 条历史注释（index.mjs:7、withService 处）措辞中性化 | 随 WC-B3 注释批次一并处理 | ✅ 2026-09-08 6a7fc55 |
 
 ## 已收口（近期）
