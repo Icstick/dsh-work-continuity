@@ -298,7 +298,8 @@ test('P1-6 pre-step 注入：有活跃 state → 追加摘要消息', async (t) 
   const injected = result.messages[1]
   assert.ok(injected.content[0].text.includes('[work-state]'))
   assert.ok(injected.content[0].text.includes('重构工具箱'))
-  assert.ok(injected.source.kind === 'plugin')
+  assert.equal(injected.source.kind, 'plugin:dsh-work-continuity')
+  assert.equal(injected.source.plugin, undefined)
   // form 是官方语义词表；自造值会让 session-format 的 v2→v3 迁移拒收整条会话（2026-09-10 事故）
   assert.equal(injected.source.form, undefined)
   t.after(() => { try { for (const c of ctx.__cleanups) c() } catch {} rmSync(dir, { recursive: true, force: true }) })

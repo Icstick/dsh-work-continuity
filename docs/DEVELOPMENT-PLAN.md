@@ -1,6 +1,7 @@
 # dsh-work-continuity — 开发计划与问题登记（Backlog）
 
 > 仓库级 backlog：进行中/待办/已收口的工作条目与已知问题。
+> 当前消息来源：工作摘要采用 `plugin:dsh-work-continuity`，满足 Session v4 生产者归属要求。
 > 维护规则：条目完成即更新状态并注明提交/日期；新发现先登记再动手（规划先行）。
 > 本文件初版登记来源：D:\DSH_workspace\docs\audits\plugin-code-review-2026-09-07.md（2026-09-07 全面审查）
 

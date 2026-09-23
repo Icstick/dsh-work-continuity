@@ -70,6 +70,9 @@ export function apply(ctx, config = {}) {
 
   // --- 设置页 namespace 注册（2026-08-30：设置 → 插件 → 插件配置 tab）---
   ctx.inject(['settings'], (settingsCtx) => {
+    // dsh >= 0.1.7（#4587）移除了 settings.register：无守卫时这里会抛错。
+    // 抛错被 cordis 吞掉、不影响 apply 主体，但会污染启动诊断 —— 无 register 即跳过。
+    if (typeof settingsCtx.settings?.register !== 'function') return
     settingsCtx.settings.register(SETTINGS_NAMESPACE, z.object({
       workDir: z.string(),
       debug: z.boolean(),
@@ -429,17 +432,14 @@ function truncateStr(text, max) {
   return s.length > max ? s.slice(0, max - 1) + '…' : s
 }
 
-/** plugin user message（手写字面量，避免引入 dsh-llm 依赖；形状对齐 createUserMessage） */
+/** 构造带生产者归属的工作摘要消息；避免引入 dsh-llm 运行时依赖。 */
 function workStatePluginMessage(text) {
   return {
     id: randomUUID(),
     role: 'user',
     content: [{ type: 'text', text }],
-    // 2026-09-10：删掉自造值 form:'work-state'。form 是官方语义词表
-    // （instructions/catalog/snapshot/notice/relay/recall），不在表内的值会让
-    // session-format 的 v2→v3 迁移拒收整条会话（本机 25 条历史会话因此打不开）。
-    // 不声明 form 属官方默认（opaque 上下文行），渲染与未知 form 完全一致。
-    source: { kind: 'plugin', plugin: 'dsh-work-continuity' },
+    // 不声明未定义的 form；会话仍保留生产者 kind 用于审计。
+    source: { kind: 'plugin:dsh-work-continuity' },
   }
 }
 

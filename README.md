@@ -25,7 +25,7 @@ Work Continuity 把工作状态变成**不用你记得记**的事：目标、决
 
 - goal/change 事件会**建档/更新**目标与状态（complete→done、pause→paused…，clear 清空）；
 - todo/write 事件只在**该工作区还没有任何 WorkState** 时自动建档（nextSteps 取自未完成任务）——已有手记内容不被每轮全量替换的 todo 覆盖；
-- 每轮 pre-step 注入紧凑摘要（goal/status/focus/下一步/handoff，~150 token），LLM 由此知道"正在追踪什么"，在节点主动用 `work_state` 工具更新；无状态或已完成（done）不注入。
+- 每轮 pre-step 注入紧凑摘要（goal/status/focus/下一步/handoff，~150 token），消息以 `source.kind: plugin:dsh-work-continuity` 标记生产者；LLM 由此知道"正在追踪什么"，在节点主动用 `work_state` 工具更新；无状态或已完成（done）不注入。
 - **压缩后重锚（2026-09-09）**：监听 `compaction/summary`——压缩会把已注入的工作摘要从上下文里抹掉，而注入只在 step 1 发生。压缩后**下一步无条件补注一次**再清标记，解决同轮后续步骤看不到工作状态的问题。
 - **注入调度器接线（v0.2.0，S1-P7 2026-09-05）**：宿主 dsh-inject-scheduler 可用时注册 `wc.work_state` 段并按实际注入量上报；未挂 scheduler 时回退为 pre-step 直接注入（两路径互斥不叠加）。
 
