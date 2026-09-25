@@ -28,6 +28,10 @@ const { createElement: h, useState, useSyncExternalStore } = require('react')
 
 /** 设置页 namespace（与 host 侧 SETTINGS_NAMESPACE 一致） */
 const NS = 'work-continuity'
+/** 0.1.7：configForms / describe 用的 profile entry id（cordis.patch.yml 的 id） */
+const ENTRY_ID = 'work-continuity'
+/** 0.1.7：「插件」页的 slot key —— 必须是 bundle 包名 */
+const BUNDLE_KEY = 'dsh-work-continuity'
 
 const TITLE = '工作连续性（Work Continuity）'
 const DESC = '跨会话工作状态 · /checkpoint'
@@ -134,8 +138,11 @@ function makeSection(scope) {
           if (!(field.name in drafts)) continue
           const parsed = parseDraft(field, drafts[field.name])
           if (parsed === undefined) continue
-          if (parsed === null) writes.push(scope.unset(field.name))
-          else writes.push(scope.set(field.name, parsed))
+          // 0.1.6 的 settingsScope 有 unset；0.1.7 的 configForms form 只有 set（置空即回到继承值）
+          if (parsed === null) {
+            if (typeof scope.unset === 'function') writes.push(scope.unset(field.name))
+            else writes.push(scope.set(field.name, undefined))
+          } else writes.push(scope.set(field.name, parsed))
         }
         await Promise.all(writes)
         setDrafts(null)
@@ -217,6 +224,36 @@ function registerSection(ctx, scope) {
  * 全程 fail-open：解析不到就 warn 后返回，绝不 throw（条目激活不受影响）。
  */
 function apply(ctx) {
+  // ---- 0.1.7：侧栏「插件」页的配置卡 ----
+  // 宿主把本 entry 的 Config 投影成 form（只有 .volatile() 字段），我们把它渲染在 bundle 自己的页面上。
+  // key 必须是 **bundle 包名**（slot-contract：keyed by the bundle's package name）。
+  // 命令式注入：0.1.6 没有 configForms → 回调不触发，条目照常激活（fail-open）。
+  try {
+    ctx.inject(['configForms'], (formsCtx) => {
+      try {
+        const forms = formsCtx.configForms
+        if (!forms || typeof forms.whileServed !== 'function' || typeof forms.get !== 'function') {
+          warn('[work-continuity] configForms 形状不认识，跳过插件页配置卡（fail-open）')
+          return
+        }
+        const form = forms.get(ENTRY_ID)
+        if (!form || typeof form.subscribe !== 'function' || typeof form.getSnapshot !== 'function') {
+          warn('[work-continuity] configForms form 形状不认识，跳过插件页配置卡（fail-open）')
+          return
+        }
+        formsCtx.effect(() => forms.whileServed([ENTRY_ID], () => formsCtx.slots.inject('plugins.bundle.config', () => formsCtx.slots.register(
+          { name: 'plugins.bundle.config', key: BUNDLE_KEY },
+          makeSection(form),
+        ))), 'work-continuity: bundle settings page')
+      } catch (error) {
+        warn('[work-continuity] 插件页配置卡注册失败，忽略：' + String(error))
+      }
+    })
+  } catch (error) {
+    warn('[work-continuity] configForms 命令式注入不可用，忽略：' + String(error))
+  }
+
+  // ---- 0.1.6 兼容：设置面板顶层 section（0.1.7 无 settingsScope，回调不触发）----
   try {
     ctx.inject(['settingsScope'], (scopeCtx) => {
       try {

@@ -15,8 +15,11 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 export const name = 'work-continuity'
 export const inject = []
 export const Config = z.object({
-  workDir: z.string(),
-  debug: z.boolean().default(false),
+  // dsh 0.1.7：插件页的配置表单由 Config schema 投影而来，且**只有 .volatile() 字段会生成 form**
+  // （packages/settings/settings/src/schema.ts 的 volatileForm()：无 volatile 字段 → 返回 undefined →
+  //  describe() 跳过该 entry → 侧栏「插件」页里没有本插件的配置卡）。2026-09-25 补。
+  workDir: z.string().volatile(),
+  debug: z.boolean().default(false).volatile(),
 })
 
 /** 设置页配置命名空间（2026-08-30：设置 → 插件 → 插件配置；settings.yaml 持久化） */
@@ -38,6 +41,27 @@ export function mergeSettingsIntoConfig(ctx, config) {
     if (value !== undefined && value !== null) merged[key] = value
   }
   return merged
+}
+
+/**
+ * dsh 0.1.7：Config 里带 .volatile() 的字段，运行时是 cosmokit 的响应式引用（不是原始值）——
+ * 读值必须先 .get()（同 dsh-usage-card 的 config[key].get() 处理）。
+ * 插件内部一律读解包后的普通值；不解包会把 ref 当字符串用（例如把对象当目录名）。
+ */
+function isVolatileRef(value) {
+  if (value === null || typeof value !== 'object') return false
+  if (typeof value.get !== 'function') return false
+  return Object.getOwnPropertySymbols(value).some((s) => String(s).includes('cosmokit.volatile'))
+}
+
+/** 递归解包 Config（volatile ref → 普通值；数组/对象逐层处理）。 */
+export function unwrapVolatileConfig(value) {
+  if (value === null || typeof value !== 'object') return value
+  if (isVolatileRef(value)) return unwrapVolatileConfig(value.get())
+  if (Array.isArray(value)) return value.map(unwrapVolatileConfig)
+  const out = {}
+  for (const [key, item] of Object.entries(value)) out[key] = unwrapVolatileConfig(item)
+  return out
 }
 
 const USAGE = [
@@ -65,19 +89,12 @@ const COMMAND_DESCRIPTION = {
 }
 
 export function apply(ctx, config = {}) {
-  // 设置页（settings.yaml）优先于 cordis.patch.yml；apply 时一次性合并（重启生效）
-  config = mergeSettingsIntoConfig(ctx, config)
+  // 设置页（settings.yaml / profile entry config）优先于 cordis.patch.yml；apply 时一次性合并（重启生效）
+  // 再解包 volatile 引用 —— Config 上的 .volatile() 是给设置表单用的，插件内部只认普通值。
+  config = unwrapVolatileConfig(mergeSettingsIntoConfig(ctx, config))
 
-  // --- 设置页 namespace 注册（2026-08-30：设置 → 插件 → 插件配置 tab）---
-  ctx.inject(['settings'], (settingsCtx) => {
-    // dsh >= 0.1.7（#4587）移除了 settings.register：无守卫时这里会抛错。
-    // 抛错被 cordis 吞掉、不影响 apply 主体，但会污染启动诊断 —— 无 register 即跳过。
-    if (typeof settingsCtx.settings?.register !== 'function') return
-    settingsCtx.settings.register(SETTINGS_NAMESPACE, z.object({
-      workDir: z.string(),
-      debug: z.boolean(),
-    }))
-  })
+  // --- 设置页 namespace 注册：dsh 0.1.7（#4587）移除了 settings.register，整块删除（2026-09-25）。
+  // 现役路径：Config schema 的 .volatile() 字段 → 宿主 describe() 投影成表单 → 侧栏「插件」页渲染。
 
   // M4 R2：workDir 必须显式（DSH_HOME 环境变量不可靠——正式实例踩坑记录）。
   // 未配置时回退 $DSH_HOME/dsh-work-continuity 并警告（fail-safe，但强烈建议显式配置）。
