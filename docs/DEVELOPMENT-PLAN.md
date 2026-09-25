@@ -26,6 +26,7 @@
 | WC-B6 | P3 | git 残留分支 ×2（已并入 master）：docs/pr-template、feat/scheduler-metering | git-guardrails 流程：本地 branch -d + push origin --delete（均已合并，无强删） | ✅ 2026-09-08（本地+远端已删） |
 | WC-B7 | 计划 | work_audit 明细查询面（可选）：按 scope/op 查审计明细 | 命令面 `/checkpoint audit [--scope <id>] [--op <op>] [--limit n]`（读 work_audit 的 ts/op/scope_id/detail；分页 + 空态提示）；模型侧可选 `work_state` action=audit（只读） | **已排期**：WC 0.5.0 候选——随 S2 观察期结束（2026-09-22）+ 下个特性批评估；期间若出现真实审计需求（注入异常/写入排查）则提前（2026-09-12 排期） |
 | WC-B8 | P3 | S2 迁移影响：运行时零依赖 memento/ACP；2 条历史注释（index.mjs:7、withService 处）措辞中性化 | 随 WC-B3 注释批次一并处理 | ✅ 2026-09-08 6a7fc55 |
+| WC-B9 | 计划 | 候选催办：把 ACP 的待审 candidate 带进 next_steps（4.3 / ACP-B18 的 WC 侧） | 新增 scripts/acp-candidate-pull.mjs：读 ACP 只读导出的 JSONL → 按 [acp:<id>] 前缀判重 → **只追加**写 next_steps；走 openWorkStore（不裸写 SQL）、带 expectedVersion（冲突不覆盖）、默认 dry-run。绑定设计见工作区 docs/plans/sync-boundary-protocol-20260922.md §7 | ✅ 2026-09-24 3af98f0（实测 8 条入 next_steps；重复拉取 8→8 条不变，即 §7 验收前半） |
 
 ## 已收口（近期）
 
