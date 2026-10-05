@@ -27,6 +27,7 @@ Work Continuity 把工作状态变成**不用你记得记**的事：目标、决
 - todo/write 事件只在**该工作区还没有任何 WorkState** 时自动建档（nextSteps 取自未完成任务）——已有手记内容不被每轮全量替换的 todo 覆盖；
 - 每轮 pre-step 注入紧凑摘要（goal/status/focus/下一步/handoff，~150 token），消息以 `source.kind: plugin:dsh-work-continuity` 标记生产者；LLM 由此知道"正在追踪什么"，在节点主动用 `work_state` 工具更新；无状态或已完成（done）不注入。
 - **压缩后重锚（2026-09-09）**：监听 `compaction/summary`——压缩会把已注入的工作摘要从上下文里抹掉，而注入只在 step 1 发生。压缩后**下一步无条件补注一次**再清标记，解决同轮后续步骤看不到工作状态的问题。
+- **设定点偏差检测（C5，2026-10-05）**：监听 `tool/call`，确定性提取本次动作的目标（write/edit 的 `file_path`、bash 的**命令首 token**），与 WorkState 里 `goal`/`focus`/`artifacts` 能确定性提出的 scope（路径前缀、反引号词、带扩展名的文件名）比对；**连续 3 次**落在 scope 外 → 下一步 pre-step 注入一条提醒（约 100 token）并落 `op=scope-drift` 审计。**不做语义判定**（那是 LLM 候选区）。goal 提不出可识别 scope 时**整体不工作**（fail-open：宁可漏报，不误报）。
 - **注入调度器接线（v0.2.0，S1-P7 2026-09-05）**：宿主 dsh-inject-scheduler 可用时注册 `wc.work_state` 段并按实际注入量上报；未挂 scheduler 时回退为 pre-step 直接注入（两路径互斥不叠加）。
 
 > 小故事：昨天你说"想给工具箱加个 FFT 工具"就睡了。当时 agent 顺手把这个构想记进了 next steps。今天新会话一开，agent 第一眼就看到 `[work-state] goal: 电子工具箱…`——不用你重复半句，直接接着昨天的话往下干。
@@ -57,13 +58,13 @@ Work Continuity 把工作状态变成**不用你记得记**的事：目标、决
 | `/checkpoint deadend <尝试> — <为何失败>` | 记录走过的死路与原因 | `/checkpoint deadend 直接改 save 签名 — 调用点太多` |
 | `/checkpoint focus <内容>` | 设置当前焦点 | `/checkpoint focus 修回归` |
 | `/checkpoint show` | 查看当前工作状态 | `/checkpoint show` |
-| `/checkpoint done <n>` | 标记第 n 个下一步已完成（与 next_meta 下标对齐，清其 deadline/deliverable） | `/checkpoint done 1` |
+| `/checkpoint done <n>` | 标记第 n 个下一步已完成；**完成时把该条的 deadline/deliverable/verify 一起留痕**（C10，2026-10-05，此前直接丢弃） | `/checkpoint done 1` |
 | `/checkpoint stats` | 使用统计（写入次数 / 完成率 / 各 scope 概览） | `/checkpoint stats` |
 | `/checkpoint clear` | 清空（重置全部字段，P1-2） | `/checkpoint clear` |
 
 ### work_state 模型工具（LLM 侧，同数据）
 
-模型可见工具 `work_state` 与 `/checkpoint` 共享同一 store/渲染/审计：action 支持 goal/decision/next/artifact/unresolved/focus/handoff/deadend/status/done/show/export/clear。**完成权分离（2026-09-09）**：模型只能把目标推到 `in_review`（已交付、待验收），`done` 不可由模型设置——需人类执行 `/checkpoint status done`。工具另接受可选 `version` 参数做乐观并发：带上你读到的 version，库中版本已变则返回 `WC_STALE_VERSION` 并要求重读再写，避免并发静默覆盖。`next` 可带 `deadline`（ISO 日期或 YYYY-MM-DD）与 `deliverable`（交付物/验收判据——完成判据=实测结果而非口头自报），写入 next_meta 与 next_steps 下标对齐（P1-1）。注入摘要已渲染到期标注（T4 M4.5）：next 匹配 nextMeta[i].deadline → 「(dl YYYY-MM-DD)」，已过期 → 「⚠ 逾期」——模型每轮可见截止时间。工具描述明确告诉模型：用户提出新构想/目标、工作到值得追踪的节点、需要跨会话记住进度时调用；琐碎单步不要记。
+模型可见工具 `work_state` 与 `/checkpoint` 共享同一 store/渲染/审计：action 支持 goal/decision/next/artifact/unresolved/focus/handoff/deadend/status/done/show/export/clear。**完成权分离（2026-09-09）**：模型只能把目标推到 `in_review`（已交付、待验收），`done` 不可由模型设置——需人类执行 `/checkpoint status done`。工具另接受可选 `version` 参数做乐观并发：带上你读到的 version，库中版本已变则返回 `WC_STALE_VERSION` 并要求重读再写，避免并发静默覆盖。`next` 可带 `deadline`（ISO 日期或 YYYY-MM-DD）、`deliverable`（交付物/验收判据——完成判据=实测结果而非口头自报）与 **`verify`（预期验证方式，C10 2026-10-05**：测试/命令/截图/人工核），写入 next_meta 与 next_steps 下标对齐（P1-1）。`done` 现在会把该条的 deliverable/deadline/verify 一并留痕到 `completedSteps` 与审计（此前是直接丢弃）。注入摘要已渲染到期标注（T4 M4.5）：next 匹配 nextMeta[i].deadline → 「(dl YYYY-MM-DD)」，已过期 → 「⚠ 逾期」——模型每轮可见截止时间。工具描述明确告诉模型：用户提出新构想/目标、工作到值得追踪的节点、需要跨会话记住进度时调用；琐碎单步不要记。
 
 ## 设计取舍
 

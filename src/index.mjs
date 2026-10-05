@@ -109,6 +109,8 @@ export function apply(ctx, config = {}) {
   registerWorkTool(ctx, store)
   registerWorkStateSection(ctx)
   registerWorkStateInjection(ctx, store)
+  // C5（2026-10-05）：设定点偏差检测器（只读事件 + 注入，fail-open）
+  registerScopeGuard(ctx, store)
 
   ctx.effect(() => () => {
     store.close()
@@ -275,6 +277,13 @@ function registerWorkTool(ctx, store) {
           type: 'string',
           description: 'action=next 时的交付物（可验收产物，完成判据=实测结果/文件而非口头自报）',
         },
+        // C10（2026-10-05）：交付物说「要交出什么」，verify 说「打算怎么验」——
+        // 两者分开，是因为「完成」和「被验证过」不是一回事（见 rules/delivery-verification）。
+        verify: {
+          type: 'string',
+          description: 'action=next 时的预期验证方式（测试/命令/截图/人工核）——done 时连同交付物一起留痕，'
+            + '让「声称完成」与「当时打算怎么验」事后可对',
+        },
         status: {
           type: 'string',
           enum: ['planned', 'active', 'blocked', 'paused', 'in_review'],
@@ -350,7 +359,7 @@ function registerWorkTool(ctx, store) {
           const result = await handleCheckpoint(store, { rawInput: raw, expectedVersion }, toolCtx)
           // next + deadline/deliverable：补写 next_meta（与 next_steps 下标对齐，最后一项）
           if (action === 'next' && result?.kind === 'success'
-              && (args.deadline !== undefined || args.deliverable !== undefined)) {
+              && (args.deadline !== undefined || args.deliverable !== undefined || args.verify !== undefined)) {
             try {
               const sid = scopeIdForCwd(sessionCwd)
               const st = store.get({ scopeId: sid })
@@ -361,6 +370,7 @@ function registerWorkTool(ctx, store) {
                 const cur = (meta[idx] && typeof meta[idx] === 'object') ? { ...meta[idx] } : {}
                 if (args.deadline !== undefined) cur.deadline = String(args.deadline).trim()
                 if (args.deliverable !== undefined) cur.deliverable = String(args.deliverable).trim()
+                if (args.verify !== undefined) cur.verify = String(args.verify).trim()
                 meta[idx] = cur
                 store.save({ scopeId: sid, nextMeta: meta })
               }
@@ -549,6 +559,119 @@ function registerWorkStateInjection(ctx, store) {
   })
 }
 
+// ===================== C5（2026-10-05）：设定点偏差检测器 =====================
+//
+// 原文（docs 里 wv-20260907-110 §七 C5）：「work-continuity 或 maid 类插件在事件流上做
+// **确定性**偏差计数：本轮工具调用目标（write/edit 路径前缀、bash 命令首 token）与
+// work_state.goal 声明的 scope（路径/仓库关键词）不匹配 → 计数；连续 N 次越界 → pre-step
+// 注入一条偏差提醒（≤100 token）。**不做语义判定**（那是 LLM 候选区）。」
+//
+// 为什么放在 WC 而不是新插件：事件流（session/event）、pre-step 注入通道、goal 数据
+// 三样这里都现成，新写一个插件只会重复这三条线。
+//
+// 边界（诚实声明）：① goal 是自然语言，scope 只能确定性提取（路径/反引号词/带扩展名文件名），
+// 提不出就让检测器**整体不工作**（fail-open）——宁可漏报，不误报；
+// ② 只做「路径/命令首 token 是否落在 scope 内」，不做意图判断；
+// ③ 提醒每会话每次越界群只发一次（发完清计数），不刷屏。
+
+/** 从工具调用里提「这次动作碰了什么」。确定性，不做语义判定；认不出返回 null。 */
+export function extractActionTarget(name, args) {
+  const n = String(name ?? '')
+  const a = (args && typeof args === 'object') ? args : {}
+  if (n === 'write' || n === 'edit' || n === 'read'
+      || n === 'write_remote' || n === 'edit_remote' || n === 'read_remote') {
+    const p = String(a.file_path ?? '').trim()
+    return p ? { kind: 'path', value: p } : null
+  }
+  if (n === 'bash' || n === 'pwsh' || n === 'shell') {
+    const c = String(a.command ?? '').trim()
+    if (!c) return null
+    const first = c.split(/\s+/)[0]
+    return first ? { kind: 'cmd', value: first } : null
+  }
+  return null
+}
+
+/** 从 goal/focus/artifacts 里确定性提 scope（路径 / 反引号词 / 带扩展名文件名）。提不出返回 []。 */
+export function goalScopeOf(state) {
+  const out = new Set()
+  const text = [state?.goal, state?.focus].map((s) => String(s ?? '')).join('\n')
+    + '\n' + (Array.isArray(state?.artifacts) ? state.artifacts.join('\n') : '')
+  for (const m of text.matchAll(/(?:~|\/)[\w.\-\/]{3,}/g)) out.add(m[0].replace(/\/+$/, ''))
+  for (const m of text.matchAll(/`([^`]{3,60})`/g)) out.add(m[1].trim())
+  for (const m of text.matchAll(/[\w-]+\.(?:md|mjs|js|ts|json|ya?ml|py|sh|db)\b/g)) out.add(m[0])
+  return [...out]
+}
+
+/** 目标是否落在 scope 内。路径用前缀双向包含，命令用首 token 等值/前缀。 */
+export function matchesScope(target, scope) {
+  const v = target?.value ?? ''
+  if (!v) return true
+  for (const s of Array.isArray(scope) ? scope : []) {
+    if (!s) continue
+    if (target.kind === 'path') {
+      if (v.startsWith(s) || s.startsWith(v) || v.includes(s) || s.includes(v)) return true
+    } else if (v === s || s.endsWith('/' + v) || s.startsWith(v)) return true
+  }
+  return false
+}
+
+/** 注册器：连续 N 次越界 → 下轮 pre-step 提醒一次。整段 fail-open。 */
+function registerScopeGuard(ctx, store) {
+  const drift = new Map() // sessionId → { count, samples }
+  const THRESHOLD = 3
+  const MAX_CHARS = 360 // ≈100 token
+  const cwdOf = (session) => session?.cwd
+    ?? (typeof ctx.get === 'function' ? ctx.get('session')?.cwd : undefined)
+
+  ctx.on('session/event', (session, event) => {
+    try {
+      if (event?.type !== 'tool/call') return
+      const target = extractActionTarget(event.data?.name, event.data?.arguments)
+      if (!target) return
+      const sid = session?.id ?? ''
+      if (!sid) return
+      const state = getStateCompat(store, scopeIdForCwd(cwdOf(session)))
+      if (!state || state.status === 'done') return
+      const scope = goalScopeOf(state)
+      if (scope.length === 0) return // goal 没写可识别的 scope → 整体不检测
+      if (matchesScope(target, scope)) { drift.delete(sid); return }
+      const rec = drift.get(sid) ?? { count: 0, samples: [] }
+      rec.count += 1
+      if (rec.samples.length < 3) rec.samples.push(target.value)
+      drift.set(sid, rec)
+    } catch { /* fail-open：检测失败不该影响事件派发 */ }
+  })
+
+  ctx.on('agent/pre-step', async (payload, next) => {
+    let decision
+    try {
+      decision = await next()
+      if (payload?.step !== 1) return decision
+      if (!decision || decision.kind !== 'enter') return decision
+      const sid = payload?.agent?.session?.id ?? ''
+      const rec = sid ? drift.get(sid) : null
+      if (!rec || rec.count < THRESHOLD) return decision
+      const cwd = cwdOf(payload?.agent?.session)
+      const state = getStateCompat(store, scopeIdForCwd(cwd))
+      if (!state || state.status === 'done') return decision
+      const scope = goalScopeOf(state).slice(0, 4).join('、') || '（goal 未写路径）'
+      const text = '[scope-guard] 连续 ' + rec.count + ' 次动作落在 goal 未声明的范围：'
+        + rec.samples.join('、') + '。goal 的 scope：' + scope
+        + '。若这是有意的，请更新 goal/artifacts；若不是，回到 scope 内。'
+      drift.delete(sid) // 提醒一次即清，避免每轮重复
+      store.appendAudit?.({ op: 'scope-drift', scopeId: scopeIdForCwd(cwd),
+        detail: 'count=' + rec.count + ' samples=' + rec.samples.join(',') })
+      return { kind: 'enter', messages: [...decision.messages, workStatePluginMessage(text.slice(0, MAX_CHARS))] }
+    } catch (err) {
+      ctx.logger?.warn?.('[work-continuity] wc:degraded scope_guard_failed reason='
+        + (err instanceof Error ? err.message : String(err)))
+      if (decision) return decision
+      return { kind: 'enter', messages: [] }
+    }
+  })
+}
+
 /** ctx.work 服务：WorkState 读写 */
 function createWorkService(store) {
   return {
@@ -694,10 +817,28 @@ async function handleCheckpoint(store, invocation, ctx) {
         return { kind: 'error', text: 'done needs a valid index: /checkpoint done <1..' + state.nextSteps.length + '>' }
       }
       const [finished] = state.nextSteps.splice(idx - 1, 1)
+      // C10（2026-10-05）：完成这一刻把 meta 抓出来。旧实现直接 splice 丢弃 nextMeta——
+      // 于是事后只能答「做了什么」，答不出「它当时声称要交付什么、打算怎么验」（P1-3 的闭环缺了一半）。
+      const finishedMeta = (Array.isArray(state.nextMeta) && state.nextMeta[idx - 1]
+        && typeof state.nextMeta[idx - 1] === 'object') ? { ...state.nextMeta[idx - 1] } : null
       if (Array.isArray(state.nextMeta)) state.nextMeta.splice(idx - 1, 1)
       // P1-1（2026-09-07 审计）：done 同步 nextMeta——防后续 next+deadline/deliverable 按下标 length-1 补写串到旧条目
-      state.completedSteps.push({ text: finished, at: new Date().toISOString() })
+      const doneRec = { text: finished, at: new Date().toISOString() }
+      if (finishedMeta) doneRec.meta = finishedMeta
+      state.completedSteps.push(doneRec)
       saveWithTrace(store, state, ctx, 'done', invocation?.expectedVersion)
+      // C10：审计里再留一条可 grep 的（completedSteps 答「做了什么」，这条答「声称怎么验」）
+      try {
+        if (finishedMeta && (finishedMeta.deliverable || finishedMeta.deadline || finishedMeta.verify)) {
+          store.appendAudit?.({
+            op: 'done', scopeId: state.scopeId,
+            detail: 'next# ' + idx + ': ' + String(finished).slice(0, 80)
+              + (finishedMeta.deliverable ? ' | 交付: ' + String(finishedMeta.deliverable).slice(0, 80) : '')
+              + (finishedMeta.verify ? ' | 验证: ' + String(finishedMeta.verify).slice(0, 80) : '')
+              + (finishedMeta.deadline ? ' | 截止: ' + String(finishedMeta.deadline) : ''),
+          })
+        }
+      } catch { /* 留痕失败不阻断完成动作 */ }
       return { kind: 'success', text: 'done: ' + finished + '（剩余 ' + state.nextSteps.length + ' 项）' }
     }
 
@@ -780,7 +921,8 @@ function renderWorkState(state) {
       const m = Array.isArray(state.nextMeta) ? state.nextMeta[i] : undefined
       const tag = m?.deadline ? '（截止 ' + m.deadline + '）' : ''
       const del = m?.deliverable ? ' [交付: ' + m.deliverable + ']' : ''
-      lines.push('  ' + (i + 1) + '. ' + s + tag + del)
+      const ver = m?.verify ? ' [验证: ' + m.verify + ']' : ''
+      lines.push('  ' + (i + 1) + '. ' + s + tag + del + ver)
     })
   }
   if (state.unresolved.length) {
@@ -824,6 +966,7 @@ export function renderWorkStateExport(state) {
       let row = String(i + 1) + '. ' + s
       if (m?.deadline) row += '（截止 ' + m.deadline + '）'
       if (m?.deliverable) row += '  → 交付: ' + m.deliverable
+      if (m?.verify) row += '  → 验证: ' + m.verify
       lines.push(row)
     })
   }
