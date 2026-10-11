@@ -573,7 +573,11 @@ function registerWorkStateInjection(ctx, store, config = {}) {
       if (reanchor && sessionId) needsReanchor.delete(sessionId)
       // S1-P7：实际注入发生 → 向调度器上报注入字符（fail-open）
       reportWorkStateUsage(ctx, sessionId, body)
-      return { kind: 'enter', messages: [...decision.messages, workStatePluginMessage(body)] }
+      // DSH 0.2.x 契约（/opt/dsh .../cordis-plugin-development/references/practices.md「Stability」）：
+      // 改写 agent/pre-step 决策**必须 spread 原决策**，否则会丢掉下游放进去的字段
+      // （文档点名的例子是 startsRequestSeries）。旧写法构造新对象，在 0.1.x 上侥幸没坏，
+      // 在 0.2.0-rc.1 上属明确违规。spread 在 0.1.x 上同样安全（多带几个未知字段无害）。
+      return { ...decision, messages: [...decision.messages, workStatePluginMessage(body)] }
     } catch (err) {
       ctx.logger?.warn?.('[work-continuity] wc:degraded work_state_inject_failed reason='
         + (err instanceof Error ? err.message : String(err)))
@@ -685,7 +689,8 @@ function registerScopeGuard(ctx, store) {
       drift.delete(sid) // 提醒一次即清，避免每轮重复
       store.appendAudit?.({ op: 'scope-drift', scopeId: scopeIdForCwd(cwd),
         detail: 'count=' + rec.count + ' samples=' + rec.samples.join(',') })
-      return { kind: 'enter', messages: [...decision.messages, workStatePluginMessage(text.slice(0, MAX_CHARS))] }
+      // 同上：必须 spread（0.2.x 契约）。这个分支在 C5 偏差提醒里。
+      return { ...decision, messages: [...decision.messages, workStatePluginMessage(text.slice(0, MAX_CHARS))] }
     } catch (err) {
       ctx.logger?.warn?.('[work-continuity] wc:degraded scope_guard_failed reason='
         + (err instanceof Error ? err.message : String(err)))

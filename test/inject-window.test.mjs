@@ -100,3 +100,18 @@ test('端到端：修好路径后，带 header.cwd 的会话不会再落 user-gl
   assert.notEqual(sid, 'user-global')
   assert.equal(sid, scopeIdForCwd('D:\\ws\\proj-a'))
 })
+
+// ---------- ③ pre-step 决策改写必须 spread（DSH 0.2.x 契约）----------
+// 0.2.0-rc.1 的 cordis-plugin-development/references/practices.md「Stability」明写：
+//   rewriting an agent/pre-step decision **must spread it** so fields such as
+//   startsRequestSeries survive。构造新对象会静默丢字段。
+// 这条锁住源码形状：src/index.mjs 里两处改写都必须带 spread。
+test('pre-step 改写决策处必须 spread（源码形状回归）', async () => {
+  const fs = await import('node:fs')
+  const src = fs.readFileSync(new URL('../src/index.mjs', import.meta.url), 'utf8')
+  const bad = src.match(/return \{ kind: 'enter', messages: \[\.\.\.decision\.messages/g) || []
+  assert.equal(bad.length, 0, '发现未 spread 的决策改写（0.2.x 会丢字段）: ' + bad.length + ' 处')
+  const good = src.match(/return \{ \.\.\.decision, messages: \[\.\.\.decision\.messages/g) || []
+  assert.ok(good.length >= 2, '应至少有 2 处 spread 改写，实际 ' + good.length)
+})
+
