@@ -25,9 +25,14 @@ Work Continuity 把工作状态变成**不用你记得记**的事：目标、决
 
 - goal/change 事件会**建档/更新**目标与状态（complete→done、pause→paused…，clear 清空）；
 - todo/write 事件只在**该工作区还没有任何 WorkState** 时自动建档（nextSteps 取自未完成任务）——已有手记内容不被每轮全量替换的 todo 覆盖；
-- 每轮 pre-step 注入紧凑摘要（goal/status/focus/下一步/handoff，~150 token），消息以 `source.kind: plugin:dsh-work-continuity` 标记生产者；LLM 由此知道"正在追踪什么"，在节点主动用 `work_state` 工具更新；无状态或已完成（done）不注入。
+- 每轮 pre-step 注入紧凑摘要（goal/status/focus/下一步/handoff，~150 token），消息以 `source.kind: plugin:dsh-work-continuity` 标记生产者；LLM 由此知道"正在追踪什么"，在节点主动用 `work_state` 工具更新；无状态不注入；已完成（done）默认也不注入（收尾语义），除非配置 `injectWhenDone: true`（2026-10-11 新增，默认 false = 行为不变）——一台机器把 status 设成 done 之后，它积压的下一步/未决项原本对整个会话都不可见，这个开关给那种场景一个出口。
 - **压缩后重锚（2026-09-09）**：监听 `compaction/summary`——压缩会把已注入的工作摘要从上下文里抹掉，而注入只在 step 1 发生。压缩后**下一步无条件补注一次**再清标记，解决同轮后续步骤看不到工作状态的问题。
 - **设定点偏差检测（C5，2026-10-05）**：监听 `tool/call`，确定性提取本次动作的目标（write/edit 的 `file_path`、bash 的**命令首 token**），与 WorkState 里 `goal`/`focus`/`artifacts` 能确定性提出的 scope（路径前缀、反引号词、带扩展名的文件名）比对；**连续 3 次**落在 scope 外 → 下一步 pre-step 注入一条提醒（约 100 token）并落 `op=scope-drift` 审计。**不做语义判定**（那是 LLM 候选区）。goal 提不出可识别 scope 时**整体不工作**（fail-open：宁可漏报，不误报）。
+- **注入窗口取尾部 + cwd 属性路径修正（2026-10-11）**：两个都是「看起来在、实际不生效」的静默缺陷，实测于 A 机（详见 `docs/ops/dsh-state-hygiene-20261011.md`）：
+  1. `decisions` / `unresolved` 是**只追加**的日志，而注入一律 `slice(0, N)` 取**数组头部** = 取最旧的 N 条。实测 223 条 decisions 时只注入 index 0,1，**index 2..222 永不进入上下文**；而注入进去的那条早在 index 23 就被「订正…这条记录不成立」推翻过。现在日志类改为 `slice(-N)` 取最新 N 条；`next_steps` **仍取头部**——它是队列（`next` 追加 / `done` 移除），队首才是「下一个该做的」。
+  2. 读会话 cwd 一律走 `session.cwd`，而 DSH 里 cwd 在 `session.header.cwd` 上（少了 `header` 一层）。可选链把「路径写错」和「字段没值」变成同一个 `undefined`，所以不报错、不抛异常，只是 `ws:<hash>` 分支**整条变成死代码**，所有会话静默落 `user-global` 桶。已收敛到 `cwdOfSession()` / `cwdFromCtx()` 两个 helper 并全量替换（读侧 5 处 + 工具伪造 session 的写侧 1 处）；判据与全文见 weaver `software-code/wv-20261011-003`。
+
+  > 注：修 cwd 路径前必须先清干净库里**带内容的 `ws:` 行**——否则那些陈旧状态会被立刻命中并注进上下文。
 - **注入调度器接线（v0.2.0，S1-P7 2026-09-05）**：宿主 dsh-inject-scheduler 可用时注册 `wc.work_state` 段并按实际注入量上报；未挂 scheduler 时回退为 pre-step 直接注入（两路径互斥不叠加）。
 
 > 小故事：昨天你说"想给工具箱加个 FFT 工具"就睡了。当时 agent 顺手把这个构想记进了 next steps。今天新会话一开，agent 第一眼就看到 `[work-state] goal: 电子工具箱…`——不用你重复半句，直接接着昨天的话往下干。
@@ -72,7 +77,7 @@ Work Continuity 把工作状态变成**不用你记得记**的事：目标、决
 
 演进路径：MVP 只做显式命令（`/checkpoint`）→ 发现没人记得敲 → 加事件自动捕获（goal/change、todo/write，**确定性触发、无 LLM 猜测**）→ 再补 LLM 自主决断（`work_state` 工具 + 摘要注入，覆盖自然语言构想）。
 
-噪声控制：已有 WorkState 不被 todo 全量替换覆盖；done 状态不注入；内容无变化不写库（diff 门控）；全部 fail-open——插件任何异常只记日志，绝不阻断对话。注入摘要含 handoff 一行（有则显示，100 字符上限）。
+噪声控制：已有 WorkState 不被 todo 全量替换覆盖；done 状态默认不注入（`injectWhenDone: true` 可放开）；内容无变化不写库（diff 门控）；全部 fail-open——插件任何异常只记日志，绝不阻断对话。注入摘要含 handoff 一行（有则显示，100 字符上限）。
 
 ## Agent 安装指南（面向自动化装配）
 

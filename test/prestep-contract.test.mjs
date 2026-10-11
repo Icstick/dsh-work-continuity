@@ -31,7 +31,7 @@ function mockAutoCtx() {
   const services = {}
   const ctx = {
     get(name) {
-      if (name === 'session') return { cwd: 'D:\\ws\\proj-guard' }
+      if (name === 'session') return { header: { cwd: 'D:\\ws\\proj-guard' } }
       if (name === 'work') return services.work
       return undefined
     },
@@ -75,7 +75,7 @@ function isPreStepDecision(v) {
 }
 
 const userMsg = (text) => ({ role: 'user', content: [{ type: 'text', text }] })
-const SESSION = { cwd: CWD, id: 'sess-guard' }
+const SESSION = { id: 'sess-guard', header: { cwd: CWD } }
 const stepPayload = (step) => ({ step, agent: { session: SESSION } })
 const baseDecision = () => ({ kind: 'enter', messages: [userMsg('随便聊聊今天的事')] })
 
@@ -239,7 +239,7 @@ test('fail-open：拿到下游决策后内部抛错 → 原样返回下游决策
   const { pre } = boot(t)
   const decision = baseDecision()
   // cwd 取值即抛：发生在 decision 赋值之后、注入之前
-  const boomSession = { id: 'sess-guard-boom', get cwd() { throw new Error('cwd boom') } }
+  const boomSession = { id: 'sess-guard-boom', header: { get cwd() { throw new Error('cwd boom') } } }
   const { result, nextCalls, sameRef } = await drive(pre, { step: 1, agent: { session: boomSession } }, { downstream: decision })
 
   assert.equal(nextCalls, 1)

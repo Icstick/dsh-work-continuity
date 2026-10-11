@@ -130,7 +130,7 @@ function mockCheckpointCtx() {
   const ctx = {
     get(name) {
       if (name === 'commands') return commands
-      if (name === 'session') return { cwd: 'D:\\ws\\wc-golden' }
+      if (name === 'session') return { header: { cwd: 'D:\\ws\\wc-golden' } }
       if (name === 'work') return services.work
       return undefined
     },

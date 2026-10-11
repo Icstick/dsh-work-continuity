@@ -123,7 +123,7 @@ function mockAutoCtx() {
   const services = {}
   const ctx = {
     get(name) {
-      if (name === 'session') return { cwd: 'D:\\ws\\proj-a' }
+      if (name === 'session') return { header: { cwd: 'D:\\ws\\proj-a' } }
       if (name === 'work') return services.work
       return undefined
     },
@@ -154,7 +154,7 @@ async function freshAuto(t) {
 
 test('P1-5 goal/change create → 建档 goal/status', async (t) => {
   const { ctx, work, scopeId } = await freshAuto(t)
-  ctx.__emit('session/event', { cwd: 'D:\\ws\\proj-a' }, {
+  ctx.__emit('session/event', { header: { cwd: 'D:\\ws\\proj-a' } }, {
     type: 'goal/change',
     data: { kind: 'goal/change', operation: 'create', goal: { objective: '完成 M6 daemon', phase: 'active' } },
   })
@@ -166,14 +166,14 @@ test('P1-5 goal/change create → 建档 goal/status', async (t) => {
 
 test('P1-5 goal/change complete/pause → status 映射', async (t) => {
   const { ctx, work, scopeId } = await freshAuto(t)
-  ctx.__emit('session/event', { cwd: 'D:\\ws\\proj-a' }, {
+  ctx.__emit('session/event', { header: { cwd: 'D:\\ws\\proj-a' } }, {
     type: 'goal/change', data: { operation: 'create', goal: { objective: 'g1', phase: 'active' } },
   })
-  ctx.__emit('session/event', { cwd: 'D:\\ws\\proj-a' }, {
+  ctx.__emit('session/event', { header: { cwd: 'D:\\ws\\proj-a' } }, {
     type: 'goal/change', data: { operation: 'complete', goal: { objective: 'g1', phase: 'complete' } },
   })
   assert.equal(work.get(scopeId).status, 'done')
-  ctx.__emit('session/event', { cwd: 'D:\\ws\\proj-a' }, {
+  ctx.__emit('session/event', { header: { cwd: 'D:\\ws\\proj-a' } }, {
     type: 'goal/change', data: { operation: 'pause', goal: { objective: 'g1', phase: 'paused' } },
   })
   assert.equal(work.get(scopeId).status, 'paused')
@@ -181,10 +181,10 @@ test('P1-5 goal/change complete/pause → status 映射', async (t) => {
 
 test('P1-5 goal/change clear → goal 清空', async (t) => {
   const { ctx, work, scopeId } = await freshAuto(t)
-  ctx.__emit('session/event', { cwd: 'D:\\ws\\proj-a' }, {
+  ctx.__emit('session/event', { header: { cwd: 'D:\\ws\\proj-a' } }, {
     type: 'goal/change', data: { operation: 'create', goal: { objective: 'g1', phase: 'active' } },
   })
-  ctx.__emit('session/event', { cwd: 'D:\\ws\\proj-a' }, {
+  ctx.__emit('session/event', { header: { cwd: 'D:\\ws\\proj-a' } }, {
     type: 'goal/change', data: { operation: 'clear', cleared: { id: 'x', revision: 2 } },
   })
   const st = work.get(scopeId)
@@ -194,7 +194,7 @@ test('P1-5 goal/change clear → goal 清空', async (t) => {
 
 test('P1-5 todo/write（≥2 未完成）且无 state → 自动建档', async (t) => {
   const { ctx, work, scopeId } = await freshAuto(t)
-  ctx.__emit('session/event', { cwd: 'D:\\ws\\proj-a' }, {
+  ctx.__emit('session/event', { header: { cwd: 'D:\\ws\\proj-a' } }, {
     type: 'todo/write',
     data: { todos: [
       { content: '修 consolidation', status: 'in_progress' },
@@ -213,10 +213,10 @@ test('P1-5 todo/write（≥2 未完成）且无 state → 自动建档', async (
 test('P1-5 todo/write 已有 state 或 <2 未完成 → 不覆盖/不建', async (t) => {
   const { ctx, work, scopeId } = await freshAuto(t)
   // 已有 state（goal 事件建档）
-  ctx.__emit('session/event', { cwd: 'D:\\ws\\proj-a' }, {
+  ctx.__emit('session/event', { header: { cwd: 'D:\\ws\\proj-a' } }, {
     type: 'goal/change', data: { operation: 'create', goal: { objective: '真目标', phase: 'active' } },
   })
-  ctx.__emit('session/event', { cwd: 'D:\\ws\\proj-a' }, {
+  ctx.__emit('session/event', { header: { cwd: 'D:\\ws\\proj-a' } }, {
     type: 'todo/write', data: { todos: [{ content: '任务A', status: 'pending' }, { content: '任务B', status: 'pending' }] },
   })
   let st = work.get(scopeId)
@@ -225,10 +225,10 @@ test('P1-5 todo/write 已有 state 或 <2 未完成 → 不覆盖/不建', async
   // 单任务不建：换 scope（不同 cwd）
   const dir2 = mkdtempSync(path.join(tmpdir(), 'acp-wc-auto2-'))
     const ctx2 = mockAutoCtx({ dir: dir2 })
-  ctx2.get = (name) => name === 'session' ? { cwd: 'D:\\ws\\proj-b' } : (name === 'work' ? ctx2.__services.work : undefined)
+  ctx2.get = (name) => name === 'session' ? { header: { cwd: 'D:\\ws\\proj-b' } } : (name === 'work' ? ctx2.__services.work : undefined)
   wcApply(ctx2, { workDir: dir2 })
   t.after(() => { try { for (const c of ctx2.__cleanups) c() } catch {} rmSync(dir2, { recursive: true, force: true }) })
-  ctx2.__emit('session/event', { cwd: 'D:\\ws\\proj-b' }, {
+  ctx2.__emit('session/event', { header: { cwd: 'D:\\ws\\proj-b' } }, {
     type: 'todo/write', data: { todos: [{ content: '单一任务', status: 'in_progress' }] },
   })
   assert.equal(ctx2.__services.work.get(scopeIdForCwd('D:\\ws\\proj-b')), null)
@@ -241,7 +241,7 @@ test('P1-6 work_state 工具注册（tools 就绪时）', async (t) => {
   const ctx = mockAutoCtx()
   const registered = []
   // 让 tools 服务可用：mockAutoCtx 的 provide 捕获；给 ctx 提供 tools
-  ctx.get = (name) => name === 'tools' ? { register: (def) => registered.push(def) } : (name === 'session' ? { cwd: 'D:\\ws\\proj-a' } : (name === 'work' ? ctx.__services.work : undefined))
+  ctx.get = (name) => name === 'tools' ? { register: (def) => registered.push(def) } : (name === 'session' ? { header: { cwd: 'D:\\ws\\proj-a' } } : (name === 'work' ? ctx.__services.work : undefined))
   wcApply(ctx, { workDir: dir })
   await new Promise((r) => setTimeout(r, 10))
   assert.ok(registered.some((d) => d.name === 'work_state'), 'work_state tool 应注册')
@@ -252,11 +252,11 @@ test('P1-6 work_state 工具 execute：goal 写入与 show 读取', async (t) =>
   const dir = mkdtempSync(path.join(tmpdir(), 'acp-wc-tool2-'))
   const ctx = mockAutoCtx()
   let toolDef = null
-  ctx.get = (name) => name === 'tools' ? { register: (def) => { toolDef = def } } : (name === 'session' ? { cwd: 'D:\\ws\\proj-a' } : (name === 'work' ? ctx.__services.work : undefined))
+  ctx.get = (name) => name === 'tools' ? { register: (def) => { toolDef = def } } : (name === 'session' ? { header: { cwd: 'D:\\ws\\proj-a' } } : (name === 'work' ? ctx.__services.work : undefined))
   wcApply(ctx, { workDir: dir })
   await new Promise((r) => setTimeout(r, 10))
   assert.ok(toolDef, '工具已注册')
-  const exec = { agent: { session: { cwd: 'D:\\ws\\proj-a' } }, signal: { throwIfAborted() {} } }
+  const exec = { agent: { session: { header: { cwd: 'D:\\ws\\proj-a' } } }, signal: { throwIfAborted() {} } }
   const r1 = await toolDef.execute({ action: 'goal', text: 'P1-6 集成验证' }, exec)
   assert.equal(r1.ok, true)
   assert.ok(r1.text.includes('goal set'))
@@ -272,10 +272,10 @@ test('P1-6 work_state 工具 execute：非法 action 不崩', async (t) => {
   const dir = mkdtempSync(path.join(tmpdir(), 'acp-wc-tool3-'))
   const ctx = mockAutoCtx()
   let toolDef = null
-  ctx.get = (name) => name === 'tools' ? { register: (def) => { toolDef = def } } : (name === 'session' ? { cwd: 'D:\\ws\\proj-a' } : (name === 'work' ? ctx.__services.work : undefined))
+  ctx.get = (name) => name === 'tools' ? { register: (def) => { toolDef = def } } : (name === 'session' ? { header: { cwd: 'D:\\ws\\proj-a' } } : (name === 'work' ? ctx.__services.work : undefined))
   wcApply(ctx, { workDir: dir })
   await new Promise((r) => setTimeout(r, 10))
-  const exec = { agent: { session: { cwd: 'D:\\ws\\proj-a' } }, signal: { throwIfAborted() {} } }
+  const exec = { agent: { session: { header: { cwd: 'D:\\ws\\proj-a' } } }, signal: { throwIfAborted() {} } }
   // schema enum 在 execute 前拦截非法 action（平台层 ToolArgsError）
   await assert.rejects(() => toolDef.execute({ action: 'bogus' }, exec), /must be one of/)
   t.after(() => { try { for (const c of ctx.__cleanups) c() } catch {} rmSync(dir, { recursive: true, force: true }) })
@@ -292,7 +292,7 @@ test('P1-6 pre-step 注入：有活跃 state → 追加摘要消息', async (t) 
   assert.ok(listeners.length >= 1, 'pre-step listener 已注册')
   const baseMessages = [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }]
   const decision = { kind: 'enter', messages: baseMessages }
-  const result = await listeners[0]({ agent: { session: { cwd: 'D:\\ws\\proj-a' } }, step: 1 }, async () => decision)
+  const result = await listeners[0]({ agent: { session: { header: { cwd: 'D:\\ws\\proj-a' } } }, step: 1 }, async () => decision)
   assert.equal(result.kind, 'enter')
   assert.equal(result.messages.length, 2)
   const injected = result.messages[1]
@@ -312,15 +312,15 @@ test('P1-6 pre-step 注入：无 state / done / 非 step1 → 不注入', async 
   const listeners = ctx.__listeners['agent/pre-step'] ?? []
   const decision = { kind: 'enter', messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }] }
   // 无 state
-  let r = await listeners[0]({ agent: { session: { cwd: 'D:\\ws\\proj-a' } }, step: 1 }, async () => decision)
+  let r = await listeners[0]({ agent: { session: { header: { cwd: 'D:\\ws\\proj-a' } } }, step: 1 }, async () => decision)
   assert.equal(r.messages.length, 1)
   // done state
   ctx.__services.work.save({ scopeId: scopeIdForCwd('D:\\ws\\proj-a'), goal: 'g', status: 'done' })
-  r = await listeners[0]({ agent: { session: { cwd: 'D:\\ws\\proj-a' } }, step: 1 }, async () => decision)
+  r = await listeners[0]({ agent: { session: { header: { cwd: 'D:\\ws\\proj-a' } } }, step: 1 }, async () => decision)
   assert.equal(r.messages.length, 1)
   // 非 step1
   ctx.__services.work.save({ scopeId: scopeIdForCwd('D:\\ws\\proj-a'), goal: 'g2', status: 'active' })
-  r = await listeners[0]({ agent: { session: { cwd: 'D:\\ws\\proj-a' } }, step: 3 }, async () => decision)
+  r = await listeners[0]({ agent: { session: { header: { cwd: 'D:\\ws\\proj-a' } } }, step: 3 }, async () => decision)
   assert.equal(r.messages.length, 1)
   t.after(() => { try { for (const c of ctx.__cleanups) c() } catch {} rmSync(dir, { recursive: true, force: true }) })
 })
@@ -347,7 +347,7 @@ test('压缩后重锚：compaction/summary 后下一步无条件补注一次，�
   wcApply(ctx, { workDir: dir })
   ctx.__services.work.save({ scopeId: scopeIdForCwd('D:\\ws\\proj-a'), goal: '压缩后别丢状态', status: 'active' })
   const pre = ctx.__listeners['agent/pre-step'] ?? []
-  const sess = { cwd: 'D:\\ws\\proj-a', id: 'sess-reanchor' }
+  const sess = { id: 'sess-reanchor', header: { cwd: 'D:\\ws\\proj-a' } }
   const mkDecision = async () => ({ kind: 'enter', messages: [] })
   // step 1：正常注入
   let r = await pre[0]({ agent: { session: sess }, step: 1 }, mkDecision)
@@ -379,7 +379,7 @@ function bootTool(t) {
   const commands = []
   ctx.get = (name) => (name === 'tools' ? { register: (def) => { toolDef = def } }
     : name === 'commands' ? { register: (def) => commands.push(def) }
-      : name === 'session' ? { cwd: 'D:\\ws\\proj-a' }
+      : name === 'session' ? { header: { cwd: 'D:\\ws\\proj-a' } }
         : name === 'work' ? ctx.__services.work : undefined)
   wcApply(ctx, { workDir: dir })
   t.after(() => { try { for (const c of ctx.__cleanups) c() } catch {} rmSync(dir, { recursive: true, force: true }) })
@@ -390,7 +390,7 @@ function bootTool(t) {
   }
 }
 
-const TOOL_EXEC = { agent: { session: { cwd: 'D:\\ws\\proj-a' } }, signal: { throwIfAborted() {} } }
+const TOOL_EXEC = { agent: { session: { header: { cwd: 'D:\\ws\\proj-a' } } }, signal: { throwIfAborted() {} } }
 
 test('完成权分离：模型工具不接受 status=done（schema 拦截）', async (t) => {
   const h = bootTool(t)

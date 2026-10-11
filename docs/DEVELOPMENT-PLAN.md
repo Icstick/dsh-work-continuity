@@ -26,9 +26,20 @@
 | WC-B6 | P3 | git 残留分支 ×2（已并入 master）：docs/pr-template、feat/scheduler-metering | git-guardrails 流程：本地 branch -d + push origin --delete（均已合并，无强删） | ✅ 2026-09-08（本地+远端已删） |
 | WC-B7 | 计划 | work_audit 明细查询面（可选）：按 scope/op 查审计明细 | 命令面 `/checkpoint audit [--scope <id>] [--op <op>] [--limit n]`（读 work_audit 的 ts/op/scope_id/detail；分页 + 空态提示）；模型侧可选 `work_state` action=audit（只读） | **已排期**：WC 0.5.0 候选——随 S2 观察期结束（2026-09-22）+ 下个特性批评估；期间若出现真实审计需求（注入异常/写入排查）则提前（2026-09-12 排期） |
 | WC-B8 | P3 | S2 迁移影响：运行时零依赖 memento/ACP；2 条历史注释（index.mjs:7、withService 处）措辞中性化 | 随 WC-B3 注释批次一并处理 | ✅ 2026-09-08 6a7fc55 |
+| WC-B10 | P1 | **注入窗口取的是数组头部**：`decisions` / `unresolved` 是只追加日志，注入却 `slice(0, N)` → 取最旧 N 条。A 机实测 223 条 decisions 时只注入 index 0,1，index 2..222 永不进入上下文；注入进去的那条（index 1）早在 index 23 就被「订正…不成立」推翻 | 日志类改 `slice(-N)` 取最新；`next_steps` 保持取头部（队列语义，队首=下一个该做的） | ✅ 2026-10-11（见下方「已收口」） |
+| WC-B11 | P1 | **读会话 cwd 少一层**：`session?.cwd` 而 DSH 里在 `session.header.cwd` → 恒 undefined → `ws:<hash>` 分支成死代码、所有会话静默落 user-global。读侧 5 处 + 工具伪造 session 的写侧 1 处 | 收敛到 `cwdOfSession()` / `cwdFromCtx()` 并全量替换；`cwdFromCtx` 加 fail-open try/catch | ✅ 2026-10-11（见下方「已收口」） |
 | WC-B9 | 计划 | 候选催办：把 ACP 的待审 candidate 带进 next_steps（4.3 / ACP-B18 的 WC 侧） | 新增 scripts/acp-candidate-pull.mjs：读 ACP 只读导出的 JSONL → 按 [acp:<id>] 前缀判重 → **只追加**写 next_steps；走 openWorkStore（不裸写 SQL）、带 expectedVersion（冲突不覆盖）、默认 dry-run。绑定设计见工作区 docs/plans/sync-boundary-protocol-20260922.md §7 | ✅ 2026-09-24 3af98f0（实测 8 条入 next_steps；重复拉取 8→8 条不变，即 §7 验收前半） |
 
 ## 已收口（近期）
+
+- **WC-B10 / WC-B11（2026-10-11，A 机体检发现）**：
+  - **注入窗口取尾部**（WC-B10）：`decisions` / `unresolved` 改为 `slice(-N)`。`next_steps` 不动——它是队列，FIFO 语义下队首正确。
+  - **cwd 属性路径**（WC-B11）：全部改读 `session.header.cwd`，收敛到两个 helper；顺带给 `cwdFromCtx` 加 fail-open（`ctx.get` 在 cordis proxy 下会抛）。
+  - **附带新增**：`injectWhenDone`（默认 false = 行为不变）——给「status=done 但仍想看见状态」的机器一个出口。
+  - **测试**：新增 `test/inject-window.test.mjs`（13 条）；**修正 3 个老测试文件的 session 伪造形状**（27 处 `{ cwd }` → `{ header: { cwd } }`）——老测试与老实现用的是同一个错形状，所以 bug 一直被两边一起遮住。
+  - 全量：**83/83 通过**，oxlint 0 error。
+  - **动手前的前置条件**：清干净库里带内容的 `ws:` 行（A 机 `ws:cc3f97d9a2f5` 已清，8 条已归档到工作区 `archive/work-state-20261011/`）；顺序反了会把陈旧状态立刻注进上下文。
+  - 依据：weaver `software-code/wv-20261011-003`、`work-skill/wv-20261011-002`；体检报告工作区 `docs/ops/dsh-state-hygiene-20261011.md`。
 
 - **form 事故（2026-09-10）**：注入消息声明自造值 `form:'work-state'` → session-format v2→v3 迁移拒收整条会话（本机 25 条历史会话受影响）✅ f6f5715（删自造值 + 回归断言 `source.form === undefined`；maid `form:'pin'`、ACP `form:'consolidation'` 同类问题同日修复，ACP `form:'recall'` 属官方词表合法值）
 

@@ -24,6 +24,11 @@ export const Config = z.object({
   // 非空时显示在 [work-state] 那行之前——给「本身没有块头」的机器用。
   // 语义对齐 dsh-persona-state 的 header，两边同文才好对账。
   header: z.string().default('').volatile(),
+  // 2026-10-11：status='done' 时是否仍然注入状态块。默认 false = 保持原行为
+  // （done 的语义就是「这摊活收尾了，别再占上下文」）。
+  // 需要打开的场景：一台机器把 status 设成 done 之后，它积压的 next_steps / unresolved
+  // 对这台机上的 agent 就完全不可见了——「收尾了但仍想看得见」时把它打开。
+  injectWhenDone: z.boolean().default(false).volatile(),
 })
 
 /** 设置页配置命名空间（2026-08-30：设置 → 插件 → 插件配置；settings.yaml 持久化） */
@@ -163,7 +168,7 @@ function captureGoalChange(ctx, store, session, data) {
   const goal = data.goal && typeof data.goal === 'object' ? data.goal : {}
   const objective = typeof goal.objective === 'string' ? goal.objective.trim() : ''
   const phase = typeof goal.phase === 'string' ? goal.phase : ''
-  const cwd = session?.cwd ?? (typeof ctx.get === 'function' ? ctx.get('session')?.cwd : undefined)
+  const cwd = cwdOfSession(session) ?? cwdFromCtx(ctx)
   const scopeId = scopeIdForCwd(cwd)
   const state = getStateCompat(store, scopeId) ?? {
     scopeId, goal: '', status: 'planned', decisions: [], checkpoints: [],
@@ -199,7 +204,7 @@ function captureTodoWrite(ctx, store, session, data) {
     && typeof t.content === 'string' && t.content.trim()
     && t.status !== 'completed')
   if (open.length < 2) return // 单任务不构成「需要追踪的节点」
-  const cwd = session?.cwd ?? (typeof ctx.get === 'function' ? ctx.get('session')?.cwd : undefined)
+  const cwd = cwdOfSession(session) ?? cwdFromCtx(ctx)
   const scopeId = scopeIdForCwd(cwd)
   const existing = getStateCompat(store, scopeId)
   if (existing) return // 已有 state：goal/change 与 /checkpoint 优先；todo 全量替换不覆盖手记
@@ -334,8 +339,7 @@ function registerWorkTool(ctx, store) {
                 + 'done 只能由人类执行 /checkpoint status done 确认。',
             }
           }
-          const sessionCwd = exec?.agent?.session?.cwd
-            ?? (typeof ctx.get === 'function' ? ctx.get('session')?.cwd : undefined)
+          const sessionCwd = cwdOfSession(exec?.agent?.session) ?? cwdFromCtx(ctx)
           // export：无副作用，直接渲染 md 快照（可落盘/进 git）
           if (action === 'export') {
             const sid = scopeIdForCwd(sessionCwd)
@@ -355,8 +359,12 @@ function registerWorkTool(ctx, store) {
             const text = typeof args.text === 'string' ? args.text.trim() : ''
             raw = text ? action + ' ' + text : action
           }
+          // 2026-10-11：这里构造的是**伪造的 session**，喂给 handleCheckpoint → scopeOf → cwdOfSession。
+          // 形状必须与真 DSH 会话一致（cwd 在 header 上）——旧写法 { cwd } 少一层，
+          // 修好读侧却漏了这里，就会让工具写的 scope 与读的 scope 对不上（实测：goal/status/handoff
+          // 全落 user-global，而测试按 ws:<hash> 去读 → null）。写侧与读侧是同一个契约。
           const toolCtx = {
-            get: (name) => (name === 'session' ? { cwd: sessionCwd } : undefined),
+            get: (name) => (name === 'session' ? { header: { cwd: sessionCwd } } : undefined),
             logger: ctx.logger,
           }
           const expectedVersion = Number.isInteger(args.version) ? args.version : undefined
@@ -404,6 +412,14 @@ function registerWorkTool(ctx, store) {
 }
 
 /** 注入预算：goal 80 / focus 60 / next 3×90 / decision 2×100 / unresolved 2×80 字符 */
+// 2026-10-11 注入窗口修正（weaver: 见 docs/ops/dsh-state-hygiene-20261011.md §2）：
+//   decisions / unresolved 是**只追加**的日志（/checkpoint decision|unresolved 永远往后 push），
+//   而旧实现一律 slice(0, N) 取**数组头部** = 取最旧的 N 条。
+//   实测（A 机 2026-10-11）：decisions 223 条 → 注入 index 0,1；index 2..222 共 221 条永不进入上下文，
+//   而 index 1 早在 index 23 就被「【订正 2026-09-21】…这条记录不成立」推翻了
+//   —— 也就是说，每轮都在把一条已作废的结论当既定事实喂进 prompt。
+//   ⇒ 日志类改为 **取尾部**（最新 N 条）。next_steps 保持取头部：它是队列（next 追加、done 移除），
+//     队首才是「下一个该做的」，FIFO 语义下头部是正确的。
 const INJECT_GOAL_MAX = 80
 const INJECT_FOCUS_MAX = 60
 const INJECT_NEXT_MAX = 3
@@ -448,11 +464,11 @@ export function renderWorkStateBrief(state, opts = {}) {
     }).join(' / '))
   }
   if (decisions.length > 0) {
-    lines.push('decided: ' + decisions.slice(0, INJECT_DECISION_MAX)
+    lines.push('decided: ' + decisions.slice(-INJECT_DECISION_MAX)
       .map((d) => truncateStr(String(d?.text ?? ''), INJECT_DECISION_CHARS)).join(' / '))
   }
   if (unresolved.length > 0) {
-    lines.push('open: ' + unresolved.slice(0, INJECT_UNRESOLVED_MAX)
+    lines.push('open: ' + unresolved.slice(-INJECT_UNRESOLVED_MAX)
       .map((u) => truncateStr(String(u), INJECT_UNRESOLVED_CHARS)).join(' / '))
   }
   if (ho?.summary) lines.push('handoff: ' + truncateStr(String(ho.summary), INJECT_HANDOFF_CHARS))
@@ -545,11 +561,12 @@ function registerWorkStateInjection(ctx, store, config = {}) {
       const reanchor = Boolean(sessionId) && needsReanchor.has(sessionId)
       if (payload?.step !== 1 && !reanchor) return decision
       if (!decision || decision.kind !== 'enter') return decision
-      const cwd = payload?.agent?.session?.cwd
-        ?? (typeof ctx.get === 'function' ? ctx.get('session')?.cwd : undefined)
+      const cwd = cwdOfSession(payload?.agent?.session) ?? cwdFromCtx(ctx)
       const scopeId = scopeIdForCwd(cwd)
       const state = getStateCompat(store, scopeId)
-      if (!state || state.status === 'done') return decision // 无 state / 已完成 → 不注入
+      // 无 state → 不注入。status='done' → 默认不注入（收尾语义），
+      // 除非显式打开 config.injectWhenDone（2026-10-11 新增，默认 false = 行为不变）。
+      if (!state || (state.status === 'done' && !config.injectWhenDone)) return decision
       const body = renderWorkStateBrief(state, { header: config.header })
       if (!body) return decision
       // 重锚补注成功（或有 state 但无摘要）→ 清标记，避免每步重复注入
@@ -628,8 +645,7 @@ function registerScopeGuard(ctx, store) {
   const drift = new Map() // sessionId → { count, samples }
   const THRESHOLD = 3
   const MAX_CHARS = 360 // ≈100 token
-  const cwdOf = (session) => session?.cwd
-    ?? (typeof ctx.get === 'function' ? ctx.get('session')?.cwd : undefined)
+  const cwdOf = (session) => cwdOfSession(session) ?? cwdFromCtx(ctx)
 
   ctx.on('session/event', (session, event) => {
     try {
@@ -1006,7 +1022,32 @@ export function renderWorkStateExport(state) {
  */
 function scopeOf(invocation, ctx) {
   const session = typeof ctx?.get === 'function' ? ctx.get('session') : undefined
-  return scopeIdForCwd(session?.cwd)
+  return scopeIdForCwd(cwdOfSession(session))
+}
+
+/**
+ * 2026-10-11：**读 cwd 一律走这两个helper，不要再写 session?.cwd。**
+ *
+ * DSH 里会话的 cwd 在 `session.header.cwd` 上，**不在** `session.cwd` 上：
+ *   - `cwd` 是 SessionHeader 的字段 —— packages/core/session/src/types.ts:105
+ *   - `Session` 类只有 `readonly header: SessionHeader` —— packages/core/session/src/index.ts:464
+ *   - DSH 自己的写法一律是 `agent.session.header.cwd`
+ *
+ * 旧写法 `session?.cwd` 少一层 → 恒 `undefined` → scopeIdForCwd 第一句回落 'user-global'
+ * → **ws:<hash> 分支成了死代码**（不是"很少命中"，是任何路径都命不中）。
+ * 这类错不报错、不抛异常：可选链把「路径写错」和「字段这次没值」变成同一个 undefined，
+ * 症状是"功能看起来在工作"。判据与全文：weaver software-code/wv-20261011-003。
+ */
+export function cwdOfSession(session) {
+  const h = session?.header
+  return (h && typeof h.cwd === 'string') ? h.cwd : undefined
+}
+export function cwdFromCtx(ctx) {
+  // fail-open：ctx.get 在 cordis proxy 下可能抛（"cannot get property 'session' without inject"）
+  try {
+    const s = (typeof ctx?.get === 'function') ? ctx.get('session') : undefined
+    return cwdOfSession(s)
+  } catch { return undefined }
 }
 
 /**
