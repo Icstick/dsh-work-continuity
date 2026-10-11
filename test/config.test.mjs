@@ -12,6 +12,7 @@ test('Config：默认值校验（debug false；workDir 缺省不报错）', asyn
   const plainEmpty = unwrapVolatileConfig(r.value)
   assert.equal(plainEmpty.debug, false)
   assert.equal(plainEmpty.workDir, undefined)
+  assert.equal(plainEmpty.header, '')
   const withBoth = await Config['~standard'].validate({ workDir: 'D:\\w', debug: true })
   const plain = unwrapVolatileConfig(withBoth.value)
   assert.equal(plain.workDir, 'D:\\w')

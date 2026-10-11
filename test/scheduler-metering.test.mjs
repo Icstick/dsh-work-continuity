@@ -122,7 +122,9 @@ test('接线守卫：apply 调用 registerWorkStateSection(ctx)（段注册接�
 test('接线守卫：pre-step 注入点存在 reportWorkStateUsage 调用（非定义行）', () => {
   const src = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/index.mjs'), 'utf8')
   const lines = src.split(/\r?\n/)
-  const bodyIdx = lines.findIndex((l) => l.includes('const body = renderWorkStateBrief(state)'))
+  // 2026-10-11：注入点带了 header 参数（renderWorkStateBrief(state, { header })）。
+  // 这条守卫查的是「接线还在不在」，不锁参数形状，故匹配到左括号为止。
+  const bodyIdx = lines.findIndex((l) => l.includes('const body = renderWorkStateBrief('))
   assert.ok(bodyIdx >= 0, '注入点存在（renderWorkStateBrief 调用）')
   const after = lines.slice(bodyIdx, bodyIdx + 6)
   assert.ok(

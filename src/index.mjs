@@ -20,6 +20,10 @@ export const Config = z.object({
   //  describe() 跳过该 entry → 侧栏「插件」页里没有本插件的配置卡）。2026-09-25 补。
   workDir: z.string().volatile(),
   debug: z.boolean().default(false).volatile(),
+  // 2026-10-11：注入块首行的块头。默认空串 = 与加这个字段之前逐字一致；
+  // 非空时显示在 [work-state] 那行之前——给「本身没有块头」的机器用。
+  // 语义对齐 dsh-persona-state 的 header，两边同文才好对账。
+  header: z.string().default('').volatile(),
 })
 
 /** 设置页配置命名空间（2026-08-30：设置 → 插件 → 插件配置；settings.yaml 持久化） */
@@ -108,7 +112,7 @@ export function apply(ctx, config = {}) {
   registerAutoCapture(ctx, store)
   registerWorkTool(ctx, store)
   registerWorkStateSection(ctx)
-  registerWorkStateInjection(ctx, store)
+  registerWorkStateInjection(ctx, store, config)
   // C5（2026-10-05）：设定点偏差检测器（只读事件 + 注入，fail-open）
   registerScopeGuard(ctx, store)
 
@@ -411,9 +415,11 @@ const INJECT_UNRESOLVED_CHARS = 80
 const INJECT_HANDOFF_CHARS = 100
 
 /** 紧凑 WorkState 摘要（pre-step 注入用；空/全空返回 ''） */
-export function renderWorkStateBrief(state) {
+export function renderWorkStateBrief(state, opts = {}) {
   if (!state) return ''
   const lines = []
+  // 2026-10-11：opts.header 非空 → 作为首行（缺省/空串 = 行为与加参数之前逐字一致）
+  const header = typeof opts.header === 'string' ? opts.header.trim() : ''
   const goal = String(state.goal ?? '').trim()
   const focus = String(state.focus ?? '').trim()
   const next = Array.isArray(state.nextSteps) ? state.nextSteps : []
@@ -451,7 +457,8 @@ export function renderWorkStateBrief(state) {
   }
   if (ho?.summary) lines.push('handoff: ' + truncateStr(String(ho.summary), INJECT_HANDOFF_CHARS))
   lines.push('(work 状态可经 work_state 工具或 /checkpoint 更新)')
-  return lines.join('\n')
+  // 2026-10-11：header 非空 → 整块前面加一行（只加这一行，其它逐字不动）
+  return (header ? header + '\n' : '') + lines.join('\n')
 }
 
 function truncateStr(text, max) {
@@ -517,7 +524,7 @@ export function reportWorkStateUsage(ctx, sessionId, body) {
  * pre-step 注入：该工作区有活跃 WorkState 时，每轮首步注入紧凑摘要 + work_state 提示。
  * fail-open：任何异常返回原决策/空决策，不阻断 turn（与 ACP composer 同范式）。
  */
-function registerWorkStateInjection(ctx, store) {
+function registerWorkStateInjection(ctx, store, config = {}) {
   // 压缩后重锚（2026-09-09）：compaction 会把已经注入过的工作摘要从上下文里抹掉，
   // 而注入只在 step 1 发生——同轮后续步骤就再也看不到工作状态了（"Compaction Cliff"）。
   // 做法：监听 compaction/summary，把会话标记为待重锚；下一次 pre-step 无条件补注一次再清标记。
@@ -543,7 +550,7 @@ function registerWorkStateInjection(ctx, store) {
       const scopeId = scopeIdForCwd(cwd)
       const state = getStateCompat(store, scopeId)
       if (!state || state.status === 'done') return decision // 无 state / 已完成 → 不注入
-      const body = renderWorkStateBrief(state)
+      const body = renderWorkStateBrief(state, { header: config.header })
       if (!body) return decision
       // 重锚补注成功（或有 state 但无摘要）→ 清标记，避免每步重复注入
       if (reanchor && sessionId) needsReanchor.delete(sessionId)

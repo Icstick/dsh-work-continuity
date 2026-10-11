@@ -458,3 +458,19 @@ test('handoff / deadend：写入并在 show、export、注入摘要中渲染', a
   assert.ok(renderWorkStateBrief(st).includes('handoff: 下一个会话先跑全量测试再改 store'))
 })
 
+// 2026-10-11：header 配置项（WC 侧补块头，对齐 dsh-persona-state 的 header 语义）
+test('renderWorkStateBrief：header 非空 → 首行；缺省/空白 → 与加参数之前逐字一致', () => {
+  const st = { goal: '对齐 persona 块头', status: 'active', focus: '当前焦点' }
+  const bare = renderWorkStateBrief(st)
+  assert.ok(bare.startsWith('[work-state] '), bare)
+  const h = '运行状态（harness 记的，不是她说的）'
+  assert.equal(renderWorkStateBrief(st, { header: h }), h + '\n' + bare)
+  // 空/空白/缺省/无 opts → 逐字等于不加参数
+  assert.equal(renderWorkStateBrief(st, { header: '' }), bare)
+  assert.equal(renderWorkStateBrief(st, { header: '   ' }), bare)
+  assert.equal(renderWorkStateBrief(st, {}), bare)
+  // 空 state 仍然返回空串（有 header 也不造块）
+  assert.equal(renderWorkStateBrief(null, { header: h }), '')
+  assert.equal(renderWorkStateBrief({}, { header: h }), '')
+})
+
