@@ -1065,15 +1065,37 @@ export function scopeIdForCwd(cwd) {
   return 'ws:' + createHash('sha256').update(cwd.toLowerCase(), 'utf8').digest('hex').slice(0, 12)
 }
 
-/** 读 WorkState：新 scopeId 优先，回落旧常量桶（一次性兼容，不做破坏性迁移） */
-function getStateCompat(store, scopeId) {
+/**
+ * 2026-10-13：**「行存在但为空」必须与「行不存在」同等对待。**
+ *
+ * 实测事故（A 机，2026-10-11→13）：cwd 属性路径修好之后，会话终于能解析出 ws:<hash>；
+ * 而那个 scope 恰好有一行**被清空的**记录（v2、goal 空、next 空）。老实现 [if (fresh) return fresh]
+ * 一命中就返回它 → renderWorkStateBrief 渲染出空串 → **整块注入静默消失**，
+ * 而 223 条 decisions / 10 条 next / 22 条 unresolved 全落在回落链更下游的 user-global 里。
+ * ⇒ 与 10-11 修的那个 bug 同族：**一个空壳把整条回落链吃掉了**。
+ *
+ * 判据与 renderWorkStateBrief 的短路条件保持一致：goal / focus / next / decisions /
+ * unresolved / handoff.summary 全空 = 这一行没有任何可注入的信息。
+ */
+export function isEmptyWorkState(st) {
+  if (!st) return true
+  const goal = String(st.goal ?? '').trim()
+  const focus = String(st.focus ?? '').trim()
+  const n = (a) => (Array.isArray(a) ? a.length : 0)
+  const hasHandoff = Boolean(st.handoff && typeof st.handoff === 'object' && String(st.handoff.summary ?? '').trim())
+  return !goal && !focus && n(st.nextSteps) === 0 && n(st.decisions) === 0 && n(st.unresolved) === 0 && !hasHandoff
+}
+
+/** 读 WorkState：新 scopeId 优先，回落旧常量桶（一次性兼容，不做破坏性迁移）。
+ *  空行不算命中 —— 见 isEmptyWorkState 的注释（2026-10-11 实测事故）。 */
+export function getStateCompat(store, scopeId) {
   const fresh = store.get({ scopeId })
-  if (fresh) return fresh
+  if (fresh && !isEmptyWorkState(fresh)) return fresh
   if (scopeId !== 'user-global') {
     const legacyWs = store.get({ scopeId: 'workspace' })
-    if (legacyWs) return { ...legacyWs, scopeId }
+    if (legacyWs && !isEmptyWorkState(legacyWs)) return { ...legacyWs, scopeId }
     const legacyGlobal = store.get({ scopeId: 'user-global' })
-    if (legacyGlobal) return { ...legacyGlobal, scopeId }
+    if (legacyGlobal && !isEmptyWorkState(legacyGlobal)) return { ...legacyGlobal, scopeId }
   }
-  return null
+  return fresh ?? null
 }

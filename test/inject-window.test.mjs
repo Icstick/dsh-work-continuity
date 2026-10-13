@@ -115,3 +115,28 @@ test('pre-step 改写决策处必须 spread（源码形状回归）', async () =
   assert.ok(good.length >= 2, '应至少有 2 处 spread 改写，实际 ' + good.length)
 })
 
+
+// ---------- ④ 空 scope 行不得吞掉回落链（2026-10-11 实测事故）----------
+// 事故形状：ws:<hash> 有一行「存在但为空」的记录，而真正的内容在 user-global。
+// 老实现 if (fresh) return fresh 一命中就返回空壳 → renderWorkStateBrief 渲染空串 → 整块注入消失。
+test('isEmptyWorkState：空行判据与 renderWorkStateBrief 的短路条件一致', async () => {
+  const { isEmptyWorkState } = await import('../src/index.mjs')
+  assert.equal(isEmptyWorkState(null), true)
+  assert.equal(isEmptyWorkState({}), true)
+  assert.equal(isEmptyWorkState({ goal: '', focus: '', nextSteps: [], decisions: [], unresolved: [], handoff: null }), true)
+  assert.equal(isEmptyWorkState({ goal: '   ' }), true)
+  assert.equal(isEmptyWorkState({ nextSteps: ['x'] }), false)
+  assert.equal(isEmptyWorkState({ decisions: [{ text: 'd' }] }), false)
+  assert.equal(isEmptyWorkState({ unresolved: ['u'] }), false)
+  assert.equal(isEmptyWorkState({ focus: 'f' }), false)
+  assert.equal(isEmptyWorkState({ goal: 'g' }), false)
+  assert.equal(isEmptyWorkState({ handoff: { summary: 'h' } }), false)
+  assert.equal(isEmptyWorkState({ handoff: { deadends: [1] } }), true, '只有 deadends 不算可注入内容')
+})
+
+test('空 scope 行的渲染结果是空串 —— 所以它绝不能算「命中」', () => {
+  const emptyRow = { scopeId: 'ws:cc3f97d9a2f5', goal: '', status: 'planned', focus: null, nextSteps: [], decisions: [], unresolved: [], handoff: null }
+  assert.equal(renderWorkStateBrief(emptyRow), '', '空行渲染为空串 —— 若拿它当命中，注入就整块消失')
+  const realRow = { scopeId: 'user-global', goal: '全局目标仍在', status: 'active', focus: null, nextSteps: ['下一步'], decisions: [], unresolved: [], handoff: null }
+  assert.ok(renderWorkStateBrief(realRow).includes('全局目标仍在'), '回落目标必须能渲染出内容')
+})
