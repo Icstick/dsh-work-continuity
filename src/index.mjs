@@ -252,7 +252,9 @@ const WORK_TOOL_ACTIONS = [
   'goal <text>', 'decision <text>', 'next <text>', 'artifact <path>',
   'unresolved <text>', 'focus <text>', 'handoff <text>', 'deadend <text>',
   'status <planned|active|blocked|paused|in_review>',
-  'done <n>', 'show', 'export', 'clear',
+  'done <n>', 'show [section]', 'export', 'stats', 'clear',
+  'edit <section> <n> expect="<当前开头>" text="<新文本>"',
+  'retire <section> <n> expect="<当前开头>" reason="<为什么>"',
 ].join(' | ')
 
 /**
@@ -327,7 +329,10 @@ function registerWorkTool(ctx, store) {
             + 'artifact=记录产物；unresolved=记录未决问题；focus=设当前焦点；'
             + 'handoff=写交接摘要（跨会话/跨 agent）；deadend=记录走过的死路与原因；'
             + 'status=更新状态（只能到 in_review，done 需人类确认）；done=标记第 n 个 next 完成；'
-            + 'show=查看当前状态；export=导出 md 快照；clear=清空',
+            + 'show=查看当前状态（可用 section 只取一节，省 token）；export=导出 md 快照；'
+            + 'stats=各 scope 用量与完成率；clear=清空（清前自动落一份 md 快照）；'
+            + 'edit=改写单条（必须带 expect 当前开头，防止改错）；'
+            + 'retire=退役单条（从活列表移走，原文与理由进 work_audit，不物理删除）',
         },
         text: {
           type: 'string',
@@ -361,7 +366,20 @@ function registerWorkTool(ctx, store) {
         },
         index: {
           type: 'integer',
-          description: 'action=done 时标记完成的 next 序号（从 1 开始）',
+          description: 'action=done 标记完成的 next 序号；action=edit/retire 时指目标条目序号（从 1 开始，与 show 的编号一致）',
+        },
+        section: {
+          type: 'string',
+          enum: ['decision', 'unresolved', 'next', 'artifact', 'goal', 'handoff', 'all'],
+          description: 'action=show 时只取这一节；action=edit/retire 时指定条目所在列表（decision/unresolved/next/artifact）',
+        },
+        expect: {
+          type: 'string',
+          description: 'action=edit/retire 必填：目标条目当前内容的开头片段（空白归一化后比较）。对不上就拒绝并回显当前内容——防下标漂移改错/删错',
+        },
+        reason: {
+          type: 'string',
+          description: 'action=retire 时的理由，写进 work_audit',
         },
       },
       output: {
