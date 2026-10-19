@@ -203,3 +203,18 @@ MIT License。参考项目致谢见 [ACKNOWLEDGMENTS.md](ACKNOWLEDGMENTS.md)。
   由 `node scripts/build-client.mjs` 生成）注册设置卡片；保存写入 settings.yaml
 - 生效语义：**保存后重启生效**（apply 时 settings 值覆盖 cordis Config）
 - 字段：workDir（重启生效）/ debug
+
+
+## work_state 工具动作（2026-10-19）
+
+| action | 用途 | 备注 |
+|---|---|---|
+| goal / focus / status / handoff / deadend | 目标、焦点、状态、交接、死路 | status 只能推到 in_review；done 由人确认 |
+| decision / next / artifact / unresolved | 追加一条 | next 可带 deadline / deliverable / verify |
+| done <n> | 标记第 n 个 next 完成 | 连同 meta 进 completed_steps |
+| show [section] | 查看 | 头部带 scope / version / 计数；section 取 goal / decisions / unresolved / next / artifacts / handoff / all |
+| edit / retire | 单条改写 / 退役 | 必须带 expect（目标条目当前内容的开头）；对不上就拒绝并回显当前内容。retire 的原文与理由进 work_audit，不物理删除；retire next 同步 nextMeta，且**不计入** completed_steps（退役≠完成） |
+| stats | 各 scope 用量与完成率 | |
+| clear | 清空 | 清前自动落一份 md 快照到 `<data>/archive/clear-<ts>.md` |
+
+edit / retire 是给「账本需要整理」用的：此前只能追加，想删一条得绕开插件写 SQLite，既跳过 version 守卫，也不留审计。现在改成工具内动作，带条目级 CAS 与审计。

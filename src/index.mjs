@@ -11,6 +11,8 @@ import { createHash, randomUUID } from 'node:crypto'
 import { openWorkStore, WORK_STATUSES, WorkStateVersionConflictError } from './store.mjs'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import path from 'node:path'
 
 export const name = 'work-continuity'
 export const inject = []
@@ -88,7 +90,8 @@ const USAGE = [
   '  done <n>            标记第 n 个下一步已完成',
   '  show                查看当前 WorkState',
   '  stats               使用统计（写入次数 / 完成率 / 各 scope 概览）',
-  '  clear               清空（重置为初始状态）',
+  '  clear               清空（重置为初始状态；清前自动落一份 md 快照到 <data>/archive/）',
+  '  （工具侧另有 edit / retire：单条改写与退役，带 expect 防改错）',
 ].join('\n')
 
 /** /checkpoint 命令描述（中文——与 ACP 命令及 work_state 工具一致；宿主无 per-locale 选择机制） */
@@ -252,6 +255,58 @@ const WORK_TOOL_ACTIONS = [
   'done <n>', 'show', 'export', 'clear',
 ].join(' | ')
 
+/**
+ * 单条改写/退役（2026-10-19）。纯函数：只动传入的 state，不碰库。
+ * 为什么不是裸 index：列表是手写的，下标会漂。expect 做条目级 CAS——
+ * 对不上就把当前内容回显出来，让调用方重读再试；宁可拒绝，不可改错。
+ * retire 不是物理删除：动作原文由调用方写进 work_audit（含理由），
+ * 且 next 的退役**不进 completedSteps**——退役不等于完成，不能污染完成率。
+ */
+const SECTION_FIELDS = {
+  decision: { field: 'decisions', object: true },
+  unresolved: { field: 'unresolved', object: false },
+  next: { field: 'nextSteps', object: false },
+  artifact: { field: 'artifacts', object: false },
+}
+
+export function mutateSectionItem(state, op, spec = {}) {
+  const conf = SECTION_FIELDS[spec.section]
+  if (!conf) return { ok: false, text: 'WC_BAD_SECTION: section 必须是 decision | unresolved | next | artifact' }
+  const arr = state[conf.field]
+  if (!Array.isArray(arr) || arr.length === 0) {
+    return { ok: false, text: 'WC_EMPTY: ' + spec.section + ' 列表为空' }
+  }
+  const idx = Number(spec.index)
+  if (!Number.isInteger(idx) || idx < 1 || idx > arr.length) {
+    return { ok: false, text: 'WC_BAD_INDEX: index 必须在 1..' + arr.length + '（与 show 的编号一致）' }
+  }
+  const item = arr[idx - 1]
+  const current = typeof item === 'string' ? item : String(item?.text ?? '')
+  const norm = (x) => String(x).replace(/\s+/g, ' ').trim()
+  const expect = norm(spec.expect ?? '')
+  if (!expect) return { ok: false, text: 'WC_EXPECT_REQUIRED: 必须带 expect（目标条目当前内容的开头片段），否则拒绝执行' }
+  if (!norm(current).startsWith(expect)) {
+    return {
+      ok: false,
+      text: 'WC_EXPECT_MISMATCH: ' + spec.section + ' #' + idx + ' 当前内容是：'
+        + current.slice(0, 200) + (current.length > 200 ? '…' : '') + '。重读后再试，expect 传开头片段。',
+    }
+  }
+  if (op === 'retire') {
+    arr.splice(idx - 1, 1)
+    if (conf.field === 'nextSteps' && Array.isArray(state.nextMeta)) state.nextMeta.splice(idx - 1, 1)
+    return { ok: true, text: 'retired ' + spec.section + ' #' + idx + ': ' + current.slice(0, 80) + '（剩 ' + arr.length + ' 项）', removed: current }
+  }
+  if (op === 'edit') {
+    const next = String(spec.text ?? '').trim()
+    if (!next) return { ok: false, text: 'WC_TEXT_REQUIRED: edit 需要 text' }
+    if (typeof item === 'string') arr[idx - 1] = next
+    else arr[idx - 1] = { ...item, text: next }
+    return { ok: true, text: 'edit ' + spec.section + ' #' + idx + ': ' + current.slice(0, 60) + ' → ' + next.slice(0, 60), before: current, after: next }
+  }
+  return { ok: false, text: 'WC_BAD_OP: ' + op }
+}
+
 /** work_state 工具注册（tools 可选服务，缺失自动跳过——headless 无 tools） */
 function registerWorkTool(ctx, store) {
   withService(ctx, 'tools', (tools) => {
@@ -267,7 +322,7 @@ function registerWorkTool(ctx, store) {
         action: {
           type: 'string',
           required: true,
-          enum: ['goal', 'decision', 'next', 'artifact', 'unresolved', 'focus', 'handoff', 'deadend', 'status', 'done', 'show', 'export', 'clear'],
+          enum: ['goal', 'decision', 'next', 'artifact', 'unresolved', 'focus', 'handoff', 'deadend', 'status', 'done', 'show', 'export', 'stats', 'clear', 'edit', 'retire'],
           description: '要执行的操作：goal=设/改目标；decision=记录决策；next=加下一步；'
             + 'artifact=记录产物；unresolved=记录未决问题；focus=设当前焦点；'
             + 'handoff=写交接摘要（跨会话/跨 agent）；deadend=记录走过的死路与原因；'
@@ -345,10 +400,43 @@ function registerWorkTool(ctx, store) {
             const sid = scopeIdForCwd(sessionCwd)
             const st = getStateCompat(store, sid)
             return { ok: true, text: renderWorkStateExport(st) }
+          }          // show：支持 section 过滤，避免一次把几十上百条全倒出来
+          if (action === 'show') {
+            const sid = scopeIdForCwd(sessionCwd)
+            const st = getStateCompat(store, sid)
+            if (!st) return { ok: true, text: '(no work state in scope ' + sid + ')' }
+            return { ok: true, text: renderWorkState(st, { section: args.section }) }
+          }
+          // edit / retire：单条原地改写与退役（2026-10-19）
+          // 不用裸 index 作唯一依据：列表是手写的，下标会漂；expect 做条目级 CAS，
+          // 对不上就回显当前内容让调用方重读。retire 不物理删除——原文+理由进 work_audit。
+          if (action === 'edit' || action === 'retire') {
+            const sid = scopeIdForCwd(sessionCwd)
+            const st = getStateCompat(store, sid)
+            if (!st) return { ok: false, text: 'WC_NO_STATE: 当前 scope 还没有 WorkState（scope=' + sid + '）' }
+            const r = mutateSectionItem(st, action, {
+              section: args.section, index: args.index, expect: args.expect, text: args.text,
+            })
+            if (!r.ok) return r
+            const saved = store.save({
+              ...st,
+              ...(Number.isInteger(args.version) ? { expectedVersion: args.version } : {}),
+            })
+            try {
+              store.appendAudit?.({
+                op: action, scopeId: sid,
+                detail: String(args.section) + '#' + String(args.index) + ': '
+                  + String(r.before ?? r.removed ?? '').slice(0, 300)
+                  + (args.reason ? ' | reason: ' + String(args.reason).slice(0, 120) : ''),
+              })
+            } catch { /* 审计失败不阻断 */ }
+            return { ok: true, text: r.text + '（v' + saved.version + '）' }
           }
           // 组 rawInput，复用 handleCheckpoint（同一 store/渲染/审计）
           let raw = ''
-          if (action === 'show' || action === 'clear' || action === 'status') {
+          if (action === 'stats') {
+            raw = 'stats'
+          } else if (action === 'show' || action === 'clear' || action === 'status') {
             raw = action === 'status'
               ? 'status ' + String(args.status ?? '').trim()
               : action
@@ -877,6 +965,17 @@ async function handleCheckpoint(store, invocation, ctx) {
       return { kind: 'success', text: renderWorkState(state) }
 
     case 'clear': {
+      // 2026-10-19：清空前先落一份 md 快照到 <data>/archive/clear-<ts>.md。
+      // clear 是唯一不可逆动作（其余全走 append/retire），快照是它唯一的事后追溯。
+      try {
+        const baseDir = store.dbPath ? path.dirname(String(store.dbPath)) : ''
+        if (baseDir) {
+          const adir = path.join(baseDir, 'archive')
+          mkdirSync(adir, { recursive: true })
+          const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+          writeFileSync(path.join(adir, 'clear-' + stamp + '.md'), renderWorkStateExport(state), 'utf8')
+        }
+      } catch { /* 快照失败不阻断清空，但会在返回文本里提示 */ }
       // P1-2（2026-09-07 审计）：save 缺省字段回填 existing——必须显式清 focus/nextMeta/completedSteps
       const clearPayload = { scopeId, goal: '', status: 'planned', focus: null, decisions: [], checkpoints: [], unresolved: [], nextSteps: [], nextMeta: [], artifacts: [], completedSteps: [], handoff: null }
       if (invocation?.expectedVersion !== undefined) clearPayload.expectedVersion = invocation.expectedVersion
@@ -933,43 +1032,50 @@ function renderStats(store) {
 }
 
 /** 渲染 WorkState 为人类可读文本 */
-function renderWorkState(state) {
+function renderWorkState(state, opts = {}) {
+  const section = typeof opts.section === 'string' && opts.section ? opts.section : 'all'
+  const want = (name) => section === 'all' || section === name || section === name + 's'
+  const counts = 'decisions ' + state.decisions.length + ' / unresolved ' + state.unresolved.length
+    + ' / next ' + state.nextSteps.length + ' / artifacts ' + state.artifacts.length
   const lines = [
-    `[work] status: ${state.status}`,
-    state.goal ? `goal: ${state.goal}` : 'goal: (none)',
-    state.focus ? `focus: ${state.focus}` : '',
+    '[work] status: ' + state.status + ' | scope: ' + (state.scopeId ?? '?') + ' | v' + (state.version ?? '?') + ' | ' + counts,
   ]
-  if (state.decisions.length) {
-    lines.push('decisions:')
-    state.decisions.forEach((d, i) => lines.push(`  ${i + 1}. ${d.text}`))
+  if (want('goal')) {
+    lines.push(state.goal ? 'goal: ' + state.goal : 'goal: (none)')
+    if (state.focus) lines.push('focus: ' + state.focus)
   }
-  if (state.nextSteps.length) {
+  if (want('decision') && state.decisions.length) {
+    lines.push('decisions:')
+    state.decisions.forEach((d, i) => lines.push('  ' + (i + 1) + '. ' + (d?.text ?? '')))
+  }
+  if (want('next') && state.nextSteps.length) {
     lines.push('next steps:')
-    state.nextSteps.forEach((s, i) => {
+    state.nextSteps.forEach((item, i) => {
       const m = Array.isArray(state.nextMeta) ? state.nextMeta[i] : undefined
       const tag = m?.deadline ? '（截止 ' + m.deadline + '）' : ''
       const del = m?.deliverable ? ' [交付: ' + m.deliverable + ']' : ''
       const ver = m?.verify ? ' [验证: ' + m.verify + ']' : ''
-      lines.push('  ' + (i + 1) + '. ' + s + tag + del + ver)
+      lines.push('  ' + (i + 1) + '. ' + item + tag + del + ver)
     })
   }
-  if (state.unresolved.length) {
+  if (want('unresolved') && state.unresolved.length) {
     lines.push('unresolved:')
-    state.unresolved.forEach((s, i) => lines.push(`  ${i + 1}. ${s}`))
+    state.unresolved.forEach((item, i) => lines.push('  ' + (i + 1) + '. ' + (typeof item === 'string' ? item : (item?.text ?? ''))))
   }
-  if (state.artifacts.length) {
+  if (want('artifact') && state.artifacts.length) {
     lines.push('artifacts:')
-    state.artifacts.forEach((a, i) => lines.push(`  ${i + 1}. ${a}`))
+    state.artifacts.forEach((a, i) => lines.push('  ' + (i + 1) + '. ' + a))
   }
   const ho = (state.handoff && typeof state.handoff === 'object') ? state.handoff : null
-  if (ho?.summary) lines.push('handoff: ' + ho.summary)
-  if (Array.isArray(ho?.deadends) && ho.deadends.length) {
-    lines.push('deadends（走过的死路与原因）:')
-    ho.deadends.forEach((d, i) => lines.push(`  ${i + 1}. ${d?.text ?? ''}`))
+  if (want('handoff')) {
+    if (ho?.summary) lines.push('handoff: ' + ho.summary)
+    if (Array.isArray(ho?.deadends) && ho.deadends.length) {
+      lines.push('deadends（走过的死路与原因）:')
+      ho.deadends.forEach((d, i) => lines.push('  ' + (i + 1) + '. ' + (d?.text ?? '')))
+    }
   }
   return lines.filter(Boolean).join('\n')
 }
-
 /** 渲染 WorkState 为 Markdown 快照（action=export；可落盘/进 git 做 diff/review） */
 export function renderWorkStateExport(state) {
   if (!state) return '(no work state)'

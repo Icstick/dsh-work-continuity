@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import path from 'node:path'
 import { openWorkStore } from '../src/store.mjs'
-import { apply as wcApply, scopeIdForCwd, renderWorkStateBrief } from '../src/index.mjs'
+import { apply as wcApply, scopeIdForCwd, renderWorkStateBrief, mutateSectionItem } from '../src/index.mjs'
 
 function fresh(t) {
   const dir = mkdtempSync(path.join(tmpdir(), 'acp-work-'))
@@ -474,3 +474,97 @@ test('renderWorkStateBrief：header 非空 → 首行；缺省/空白 → 与加
   assert.equal(renderWorkStateBrief({}, { header: h }), '')
 })
 
+
+// ---- 2026-10-19：edit / retire / show section ----
+
+test('mutateSectionItem：edit 命中 expect 才改，保留对象形状', () => {
+  const state = {
+    decisions: [{ text: '甲决策', evidenceIds: ['ev1'] }, { text: '乙决策', evidenceIds: [] }],
+    unresolved: ['未决一'], nextSteps: ['下一步一'], nextMeta: [null], artifacts: ['a/b.md'],
+  }
+  const r = mutateSectionItem(state, 'edit', { section: 'decision', index: 1, expect: '甲决策', text: '甲决策（改）' })
+  assert.equal(r.ok, true)
+  assert.equal(state.decisions[0].text, '甲决策（改）')
+  assert.deepEqual(state.decisions[0].evidenceIds, ['ev1'])
+  assert.equal(state.decisions.length, 2)
+})
+
+test('mutateSectionItem：expect 不符 → 拒绝、回显当前内容、不落任何改动', () => {
+  const state = { decisions: [{ text: '甲决策', evidenceIds: [] }, { text: '乙决策' }], unresolved: [], nextSteps: [], artifacts: [] }
+  const r = mutateSectionItem(state, 'retire', { section: 'decision', index: 1, expect: '乙决策' })
+  assert.equal(r.ok, false)
+  assert.match(r.text, /WC_EXPECT_MISMATCH/)
+  assert.ok(r.text.includes('甲决策'))
+  assert.equal(state.decisions.length, 2)
+})
+
+test('mutateSectionItem：retire next 同步 nextMeta，且不计入 completedSteps', () => {
+  const state = {
+    decisions: [], unresolved: [], artifacts: [],
+    nextSteps: ['下一步一', '下一步二'],
+    nextMeta: [{ deliverable: 'A' }, { deliverable: 'B', deadline: '2026-11-01' }],
+    completedSteps: [],
+  }
+  const r = mutateSectionItem(state, 'retire', { section: 'next', index: 1, expect: '下一步一' })
+  assert.equal(r.ok, true)
+  assert.deepEqual(state.nextSteps, ['下一步二'])
+  assert.deepEqual(state.nextMeta, [{ deliverable: 'B', deadline: '2026-11-01' }])
+  assert.equal(state.completedSteps.length, 0, '退役不等于完成，不能污染完成率')
+})
+
+test('mutateSectionItem：缺 expect / 越界 / 空列表都拒绝', () => {
+  const state = { decisions: [{ text: 'x' }], unresolved: [], nextSteps: [], artifacts: [] }
+  assert.match(mutateSectionItem(state, 'retire', { section: 'decision', index: 1 }).text, /WC_EXPECT_REQUIRED/)
+  assert.match(mutateSectionItem(state, 'retire', { section: 'decision', index: 9, expect: 'x' }).text, /WC_BAD_INDEX/)
+  assert.match(mutateSectionItem(state, 'retire', { section: 'unresolved', index: 1, expect: 'x' }).text, /WC_EMPTY/)
+  assert.match(mutateSectionItem(state, 'retire', { section: 'bogus', index: 1, expect: 'x' }).text, /WC_BAD_SECTION/)
+})
+
+test('work_state 工具：edit / retire / show section 端到端', async (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'acp-wc-tool4-'))
+  const ctx = mockAutoCtx()
+  let toolDef = null
+  ctx.get = (name) => name === 'tools' ? { register: (def) => { toolDef = def } } : (name === 'session' ? { header: { cwd: 'D:\\ws\\proj-edit' } } : (name === 'work' ? ctx.__services.work : undefined))
+  wcApply(ctx, { workDir: dir })
+  await new Promise((r) => setTimeout(r, 10))
+  const exec = { agent: { session: { header: { cwd: 'D:\\ws\\proj-edit' } } }, signal: { throwIfAborted() {} } }
+  await toolDef.execute({ action: 'decision', text: '甲决策' }, exec)
+  await toolDef.execute({ action: 'decision', text: '乙决策' }, exec)
+  await toolDef.execute({ action: 'artifact', text: 'D:\\ws\\proj-edit\\out.md' }, exec)
+
+  const e = await toolDef.execute({ action: 'edit', section: 'decision', index: 2, expect: '乙决策', text: '乙决策（改）' }, exec)
+  assert.equal(e.ok, true)
+  const r = await toolDef.execute({ action: 'retire', section: 'decision', index: 1, expect: '甲决策', reason: '重复' }, exec)
+  assert.equal(r.ok, true)
+
+  const st = ctx.__services.work.get(scopeIdForCwd('D:\\ws\\proj-edit'))
+  assert.deepEqual(st.decisions.map((d) => d.text), ['乙决策（改）'])
+  assert.equal(st.artifacts.length, 1)
+
+  const sec = await toolDef.execute({ action: 'show', section: 'decision' }, exec)
+  assert.ok(sec.text.includes('乙决策（改）'))
+  assert.ok(!sec.text.includes('out.md'), 'section=decision 不应带 artifacts')
+  const secA = await toolDef.execute({ action: 'show', section: 'artifact' }, exec)
+  assert.ok(secA.text.includes('out.md'))
+  assert.ok(!secA.text.includes('乙决策'), 'section=artifact 不应带 decisions')
+  assert.ok(secA.text.includes('v'), 'show 头部应带版本号')
+  t.after(() => { try { for (const c of ctx.__cleanups) c() } catch {} rmSync(dir, { recursive: true, force: true }) })
+})
+
+test('clear：清空前写 md 快照到 <data>/archive/', async (t2) => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'acp-wc-clear-'))
+  const registered = []
+  const ctx = mockCtx({ commandsAtStart: { register: (def) => registered.push(def) } })
+  wcApply(ctx, { workDir: dir })
+  await registered[0].handler({ rawInput: 'goal 快照测试目标' })
+  await registered[0].handler({ rawInput: 'decision 快照测试决策' })
+  const r = await registered[0].handler({ rawInput: 'clear' })
+  assert.equal(r.kind, 'success')
+  const adir = path.join(dir, 'archive')
+  assert.ok(existsSync(adir), 'archive 目录应存在')
+  const files = (await import('node:fs')).readdirSync(adir).filter((f) => f.startsWith('clear-') && f.endsWith('.md'))
+  assert.equal(files.length, 1)
+  const md = (await import('node:fs')).readFileSync(path.join(adir, files[0]), 'utf8')
+  assert.ok(md.includes('快照测试目标'))
+  t2.after(() => { try { rmSync(dir, { recursive: true, force: true }) } catch { /* Windows: store 仍开着句柄，留着不动 */ } })
+})
