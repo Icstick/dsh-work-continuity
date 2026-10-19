@@ -31,6 +31,9 @@ export const Config = z.object({
   // 需要打开的场景：一台机器把 status 设成 done 之后，它积压的 next_steps / unresolved
   // 对这台机上的 agent 就完全不可见了——「收尾了但仍想看得见」时把它打开。
   injectWhenDone: z.boolean().default(false).volatile(),
+  // 2026-10-19：stats 聚合时排除的 scope（典型：user-global 被用作某工作区的镜像行，
+  // 不排会把同一件事数两遍）。缺省空 = 行为不变。
+  statsExcludeScopes: z.array(z.string()).default([]),
 })
 
 /** 设置页配置命名空间（2026-08-30：设置 → 插件 → 插件配置；settings.yaml 持久化） */
@@ -116,9 +119,9 @@ export function apply(ctx, config = {}) {
   const store = openWorkStore({ dir: config.workDir })
   ctx.provide('work', createWorkService(store))
 
-  registerCheckpointCommand(ctx, store)
+  registerCheckpointCommand(ctx, store, config)
   registerAutoCapture(ctx, store)
-  registerWorkTool(ctx, store)
+  registerWorkTool(ctx, store, config)
   registerWorkStateSection(ctx)
   registerWorkStateInjection(ctx, store, config)
   // C5（2026-10-05）：设定点偏差检测器（只读事件 + 注入，fail-open）
@@ -310,7 +313,7 @@ export function mutateSectionItem(state, op, spec = {}) {
 }
 
 /** work_state 工具注册（tools 可选服务，缺失自动跳过——headless 无 tools） */
-function registerWorkTool(ctx, store) {
+function registerWorkTool(ctx, store, config = {}) {
   withService(ctx, 'tools', (tools) => {
     if (!tools || typeof tools.register !== 'function') return
     tools.register(defineTool({
@@ -474,7 +477,7 @@ function registerWorkTool(ctx, store) {
             logger: ctx.logger,
           }
           const expectedVersion = Number.isInteger(args.version) ? args.version : undefined
-          const result = await handleCheckpoint(store, { rawInput: raw, expectedVersion }, toolCtx)
+          const result = await handleCheckpoint(store, { rawInput: raw, expectedVersion, excludeScopes: config.statsExcludeScopes }, toolCtx)
           // next + deadline/deliverable：补写 next_meta（与 next_steps 下标对齐，最后一项）
           if (action === 'next' && result?.kind === 'success'
               && (args.deadline !== undefined || args.deliverable !== undefined || args.verify !== undefined)) {
@@ -842,7 +845,7 @@ function withService(ctx, serviceName, fn) {
 }
 
 /** /checkpoint 命令注册（commands 可选服务，缺失时等待其就绪） */
-function registerCheckpointCommand(ctx, store) {
+function registerCheckpointCommand(ctx, store, config = {}) {
   withService(ctx, 'commands', (commands) => {
     if (!commands || typeof commands.register !== 'function') return
     commands.register({
@@ -851,7 +854,7 @@ function registerCheckpointCommand(ctx, store) {
       input: { hint: COMMAND_DESCRIPTION.hint },
       handler: async (invocation) => {
         try {
-          return handleCheckpoint(store, invocation, ctx)
+          return handleCheckpoint(store, { ...invocation, excludeScopes: config.statsExcludeScopes }, ctx)
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
           return { kind: 'error', text: 'checkpoint error: ' + message }
@@ -977,7 +980,7 @@ async function handleCheckpoint(store, invocation, ctx) {
     }
 
     case 'stats':
-      return { kind: 'success', text: renderStats(store) }
+      return { kind: 'success', text: renderStats(store, invocation?.excludeScopes) }
 
     case 'show':
       return { kind: 'success', text: renderWorkState(state) }
@@ -1027,8 +1030,11 @@ function saveWithTrace(store, state, ctx, op, expectedVersion) {
 }
 
 /** P1-3：使用统计——直接回答「这功能被用了几次、有多少 next 真的完成了」 */
-function renderStats(store) {
-  const states = typeof store.list === 'function' ? store.list() : []
+export function renderStats(store, excludeScopes = []) {
+  const exclude = new Set((Array.isArray(excludeScopes) ? excludeScopes : []).map(String))
+  const all = typeof store.list === 'function' ? store.list() : []
+  const states = all.filter((s) => !exclude.has(String(s.scopeId)))
+  const skipped = all.length - states.length
   const audit = typeof store.auditStats === 'function' ? store.auditStats(7) : []
   const totalNext = states.reduce((n, s) => n + (s.nextSteps?.length ?? 0), 0)
   const totalDone = states.reduce((n, s) => n + (s.completedSteps?.length ?? 0), 0)
@@ -1037,7 +1043,7 @@ function renderStats(store) {
     : 'n/a'
   const lines = [
     '[work] 使用统计',
-    'WorkState 条数: ' + states.length,
+    'WorkState 条数: ' + states.length + (skipped > 0 ? '（已排除 ' + skipped + ' 个 scope：' + [...exclude].join(', ') + '）' : ''),
     '下一步：待完成 ' + totalNext + ' / 已完成 ' + totalDone + '（完成率 ' + rate + '）',
     '最近 7 天审计: ' + (audit.length ? audit.map((a) => a.op + '=' + a.count).join(', ') : '（无记录）'),
   ]
@@ -1048,7 +1054,6 @@ function renderStats(store) {
   }
   return lines.join('\n')
 }
-
 /** 渲染 WorkState 为人类可读文本 */
 function renderWorkState(state, opts = {}) {
   const section = typeof opts.section === 'string' && opts.section ? opts.section : 'all'

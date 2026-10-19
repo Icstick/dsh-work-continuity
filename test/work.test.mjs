@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import path from 'node:path'
 import { openWorkStore } from '../src/store.mjs'
-import { apply as wcApply, scopeIdForCwd, renderWorkStateBrief, mutateSectionItem } from '../src/index.mjs'
+import { apply as wcApply, scopeIdForCwd, renderWorkStateBrief, mutateSectionItem, renderStats } from '../src/index.mjs'
 
 function fresh(t) {
   const dir = mkdtempSync(path.join(tmpdir(), 'acp-work-'))
@@ -567,4 +567,18 @@ test('clear：清空前写 md 快照到 <data>/archive/', async (t2) => {
   const md = (await import('node:fs')).readFileSync(path.join(adir, files[0]), 'utf8')
   assert.ok(md.includes('快照测试目标'))
   t2.after(() => { try { rmSync(dir, { recursive: true, force: true }) } catch { /* Windows: store 仍开着句柄，留着不动 */ } })
+})
+
+test('renderStats：excludeScopes 排除镜像行，不重复计数', (t) => {
+  const store = fresh(t)
+  store.save({ scopeId: 'ws:a', goal: 'g', nextSteps: ['n1', 'n2'], completedSteps: [{ text: 'd' }] })
+  store.save({ scopeId: 'user-global', goal: 'g', nextSteps: ['n1', 'n2'], completedSteps: [{ text: 'd' }] })
+  const all = renderStats(store)
+  assert.ok(all.includes('WorkState 条数: 2'))
+  assert.ok(all.includes('待完成 4'), '不排除时两边都数')
+  const filtered = renderStats(store, ['user-global'])
+  assert.ok(filtered.includes('WorkState 条数: 1'))
+  assert.ok(filtered.includes('已排除 1 个 scope'))
+  assert.ok(!filtered.split('\n').some((l) => l.includes('· user-global')), '列表里不应再出现被排除的 scope')
+  assert.ok(filtered.includes('待完成 2'), '排除后只数一次')
 })
